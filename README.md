@@ -460,23 +460,6 @@ const maxMessages = 6;
 
 Running on your PC, the bot dies along with your computer. To keep it always on, use a hosting service like [Render](https://render.com/).
 
-**Before deploying, edit `index.js`.** Right now the port is hardcoded:
-
-```javascript
-const wss = new WebSocket.Server({ port: 8080 });
-```
-
-Cloud services require the program to use whatever port **they** assign. Replace it with:
-
-```javascript
-const PORT = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port: PORT });
-```
-
-That way it still uses 8080 on your machine and the right port in the cloud.
-
-Then:
-
 1. Push the project to a GitHub repository (**without `.env`**).
 2. On Render, create a **Web Service** connected to that repository.
 3. Under *Build Command* use `npm install`, and under *Start Command* use `node index.js`.
