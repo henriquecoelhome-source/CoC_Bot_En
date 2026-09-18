@@ -2,6 +2,8 @@
 
 A Discord bot that reads investigators' character sheets straight from a Google Sheets spreadsheet, rolls d100 tests applying the Call of Cthulhu 7th edition rules, and shows the result on your stream in real time, with animation and sound.
 
+🌐 This project is also available in [Portuguese BR](https://github.com/henriquecoelhome-source/CoC_Bot.git)
+
 > **Never touched programming before?** No problem. This guide is written for you to follow from scratch, in order, without skipping steps. It takes about 30 to 40 minutes the first time.
 
 ---
