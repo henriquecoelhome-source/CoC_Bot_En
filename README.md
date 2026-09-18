@@ -42,16 +42,16 @@ Automatically calculates the success level (Extreme, Hard, Regular, Failure or F
 
 **How rolls show up on Discord:**
 
-![Example of a roll on Discord](assets/exemplo4.png)
+![Example of a roll on Discord](assets/preview2.png)
 
 **Integration with the Rollem bot:**
 If your table uses the Rollem bot for damage rolls or generic dice (like `1d20` or `3d6`), the overlay also captures and displays those results.
 
-![Example of rolls with Rollem](assets/exemplo2.png)
+![Example of rolls with Rollem](assets/preview3.png)
 
 **Example in a full stream layout:**
 
-![Example in a full layout](assets/exemplo3.png)
+![Example in a full layout](assets/preview4.png)
 
 ---
 ## 🔄 How it works
