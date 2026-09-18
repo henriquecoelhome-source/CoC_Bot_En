@@ -150,10 +150,10 @@ When it's done, your folder should contain:
 ```
 index.js  overlayOBS.html  package.json  README.md  LICENSE
 crit.mp3  falhacrit.mp3  diceroll1.mp3  diceroll2.mp3  diceroll3.mp3
-Ficha_CoC_en.xlsx
+Character_Sheet_CoC.xlsx
 ```
 
-> 💡 The sound file names (`falhacrit.mp3`, etc.) are kept exactly as they are in the source project — don't rename them, the code refers to them by these exact names (see [Customizing the look and the sounds](#-customizing-the-look-and-the-sounds)). The character-sheet template, `Ficha_CoC_en.xlsx`, is a fully English translation of the original — feel free to rename it once it's in your Google Drive, since the bot only reads what's written inside each tab, not the file's name.
+> 💡 The sound file names (`falhacrit.mp3`, etc.) are kept exactly as they are in the source project — don't rename them, the code refers to them by these exact names (see [Customizing the look and the sounds](#-customizing-the-look-and-the-sounds)). The character-sheet template, `Character_Sheet_CoC.xlsx`, is a fully English translation of the original — feel free to rename it once it's in your Google Drive, since the bot only reads what's written inside each tab, not the file's name.
 
 ---
 
@@ -222,7 +222,7 @@ To read the spreadsheet and also write `/register` links back into it, the bot n
 
 ## Step 5 — Prepare the character-sheet spreadsheet
 
-> 💡 **A ready-made character sheet template is included in this repository** (`Ficha_CoC_en.xlsx`), based on the one created by **Alan** 🏊‍♂️ and fully translated to English. It's **fully automatic**: Hit Points, Sanity, attributes and skills already come with the calculations built in — just duplicate it and fill in your investigator's data and the rest adjusts itself. Download the file, upload it to your Google Drive, open it with Google Sheets (right-click → *Open with* → *Google Sheets*) and follow from step 5.1 below to grant access.
+> 💡 **A ready-made character sheet template is included in this repository** (`Character_Sheet_CoC.xlsx`), based on the one created by **Alan** 🏊‍♂️ and fully translated to English. It's **fully automatic**: Hit Points, Sanity, attributes and skills already come with the calculations built in — just duplicate it and fill in your investigator's data and the rest adjusts itself. Download the file, upload it to your Google Drive, open it with Google Sheets (right-click → *Open with* → *Google Sheets*) and follow from step 5.1 below to grant access.
 >
 > In some cases a minor visual glitch can show up on the attributes — a black line appearing on some cells for some reason — but it's purely cosmetic and doesn't affect the calculations or how the bot reads the sheet.
 
@@ -518,14 +518,14 @@ const ws = new WebSocket('wss://your-app.onrender.com');
 ## 📁 File structure
 
 ```
-├── index.js           # the bot: Discord, Google Sheets (read and write), and the WebSocket server
-├── overlayOBS.html    # the overlay that goes in OBS (HTML, CSS and JS in a single file)
-├── Ficha_CoC_en.xlsx  # automatic character-sheet template (English version, based on Alan's original) — HP, Sanity and skills calculate themselves
-├── package.json       # dependency list
-├── .env               # your secret keys (you create this, never push it to GitHub)
-├── crit.mp3           # critical-success sound
-├── falhacrit.mp3      # fumble sound
-└── diceroll1-3.mp3    # roll sounds (randomly picked each time)
+├── index.js                  # the bot: Discord, Google Sheets (read and write), and the WebSocket server
+├── overlayOBS.html           # the overlay that goes in OBS (HTML, CSS and JS in a single file)
+├── Character_Sheet_CoC.xlsx  # automatic character-sheet template (English version, based on Alan's original) — HP, Sanity and skills calculate themselves
+├── package.json              # dependency list
+├── .env                      # your secret keys (you create this, never push it to GitHub)
+├── crit.mp3                  # critical-success sound
+├── falhacrit.mp3             # fumble sound
+└── diceroll1-3.mp3           # roll sounds (randomly picked each time)
 ```
 
 🆘 Need help?
@@ -547,7 +547,7 @@ Feel free to ask — the whole point of this tool is to make life easier for eve
 
 ## 🏊‍♂️ Credits
 
-- **Alan** — created the original investigator sheet template used by this project (translated to English here as `Ficha_CoC_en.xlsx`). It's fully automatic: it fills in Hit Points, Sanity, attributes and skills on its own from the character's basic data, with no formulas to touch.
+- **Alan** — created the original investigator sheet template used by this project (translated to English here as `Character_Sheet_CoC.xlsx`). It's fully automatic: it fills in Hit Points, Sanity, attributes and skills on its own from the character's basic data, with no formulas to touch.
 
 ---
 
