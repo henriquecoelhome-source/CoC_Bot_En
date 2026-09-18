@@ -15,10 +15,8 @@
             box-sizing: border-box;
         }
 
-        /* The display size is set in OBS's Browser Source Properties
-           (Width/Height). This container fills 100% of the space given
-           to it — adjust the source's dimensions in OBS to match the
-           space available in your scene. */
+        /* Set the actual display size in OBS's Browser Source properties —
+           this container just fills whatever space the source gives it. */
         #chat-container {
             width: 100%;
             height: 100%;
@@ -148,15 +146,12 @@
 
     <script>
         const chatContainer = document.getElementById('chat-container');
-        const maxMessages = 6; // Number of roll cards kept visible on screen at once.
+        const maxMessages = 6; // cards kept on screen at once
 
         const rollSounds = ['diceroll1.mp3', 'diceroll2.mp3', 'diceroll3.mp3'];
 
-        /**
-         * Plays an audio file and resolves the Promise once playback ends
-         * (or fails) — this guarantees the audio queue never gets stuck if
-         * the file is missing or invalid.
-         */
+        // Resolves once playback ends (or fails) so the audio queue never
+        // hangs if a file is missing or the browser blocks autoplay.
         function playSound(src, volume) {
             return new Promise((resolve) => {
                 const audio = new Audio(src);
@@ -174,11 +169,7 @@
             });
         }
 
-        /**
-         * Plays the roll sound (randomly picked among the available
-         * variations) and, right after, the critical-success or fumble
-         * sound, if that applies to the received event.
-         */
+        // Roll sound (random pick) followed by crit/fumble sound if it applies.
         async function playAudioSequence(eventKind) {
             const rollSound = rollSounds[Math.floor(Math.random() * rollSounds.length)];
             await playSound(rollSound, 0.8);
@@ -209,9 +200,7 @@
             div.className = `message ${eventClass(data.event)}`.trim();
 
             if (data.type === 'command') {
-                // Structured message coming from /roll: skill, target and
-                // status as separate fields, with no parentheses or arrows
-                // embedded in the text.
+                // /roll — skill, target and status come as separate fields.
                 const advantageSuffix = data.advantage ? ` · ${escapeHtml(data.advantage)}` : '';
                 div.innerHTML = `
                     <div class="header-row">
@@ -228,9 +217,8 @@
                     </div>
                 `;
             } else {
-                // Raw message from the "rollem" bot: strips Discord
-                // formatting and highlights the numbers, keeping the same
-                // visual layout as the structured card.
+                // Raw "rollem" message — strip Discord formatting and
+                // highlight the numbers to match the structured card's look.
                 const cleanText = (data.result || '').replace(/[*_~`]/g, '');
                 const formattedText = escapeHtml(cleanText).replace(/([0-9]+)/g, '<span class="highlight-number">$1</span>');
                 div.innerHTML = `
@@ -249,19 +237,16 @@
         }
 
         function connect() {
-            // Replace this address with your own bot server's address
-            // (see the README — use ws:// for local, wss:// for a hosted
-            // server such as Render).
+            // Point this at your own bot server (ws:// locally, wss://
+            // once it's hosted somewhere like Render).
             const ws = new WebSocket('wss://coc-bot-nj88.onrender.com');
 
             ws.onmessage = function(event) {
                 const data = JSON.parse(event.data);
 
                 if (data.type === 'history') {
-                    // Backlog of rolls that happened while the overlay was
-                    // disconnected. Renders each one to recover what was
-                    // missed, but without playing the sounds again (otherwise
-                    // they'd all play at once on reconnect).
+                    // Backlog from while the overlay was disconnected — render
+                    // it to catch up, but skip the sounds or they'd all fire at once.
                     data.events.forEach(renderMessage);
                     return;
                 }
