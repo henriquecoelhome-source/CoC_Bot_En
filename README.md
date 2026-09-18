@@ -33,7 +33,7 @@ A Discord bot that reads investigators' character sheets straight from a Google 
 ---
 ## 📸 What it looks like on stream/recording
 
-Below you can see what the overlay looks like in OBS (images are from the [Portuguese version](https://github.com/henriquecoelhome-source/CoC_Bot.git), but it doesn't affect the visuals). Cards appear on screen in real time, along with sound effects.
+Below you can see what the overlay looks like in OBS. Cards appear on screen in real time, along with sound effects.
 
 **Rolls made natively by the bot:**
 Automatically calculates the success level (Extreme, Hard, Regular, Failure or Fumble) and applies colors matching the Call of Cthulhu 7th edition results, including support for Advantage and Disadvantage.
