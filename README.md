@@ -74,7 +74,7 @@ If your table uses the Rollem bot for damage rolls or generic dice (like `1d20` 
 
 | Feature | Description |
 |---|---|
-| **Character sheets in Google Sheets** | Reads attributes (STR, DEX, INT, CON, APP, POW, SIZ, EDU — printed on the sheet using their original Portuguese abbreviations, see the note in [Step 5](#53-how-the-spreadsheet-needs-to-be-organized-skip-if-using-the-provided-one)), Luck, Sanity, and every skill straight from the spreadsheet. |
+| **Character sheets in Google Sheets** | Reads attributes (STR, DEX, INT, CON, APP, POW, SIZ, EDU), Luck, Sanity, and every skill straight from the spreadsheet. |
 | **`/register`** | Links the Discord player to their character sheet tab. The link is saved in the spreadsheet itself and survives restarts and deploys. |
 | **`/roll`** | Rolls the skill with autocomplete and already calculates the success level. |
 | **CoC 7e rules** | Critical Success (01), Extreme Success (⅕), Hard (½), Regular, Failure and Fumble. |
@@ -148,10 +148,10 @@ When it's done, your folder should contain:
 ```
 index.js  overlayOBS.html  package.json  README.md  LICENSE
 crit.mp3  falhacrit.mp3  diceroll1.mp3  diceroll2.mp3  diceroll3.mp3
-Ficha-CoC-modelo.xlsx
+Ficha_CoC_en.xlsx
 ```
 
-> 💡 The sound file names (`falhacrit.mp3`, etc.) and the spreadsheet template name (`Ficha-CoC-modelo.xlsx`) are kept exactly as they are in the source project — don't rename them, the code refers to them by these exact names (see [Customizing the look and the sounds](#-customizing-the-look-and-the-sounds)).
+> 💡 The sound file names (`falhacrit.mp3`, etc.) are kept exactly as they are in the source project — don't rename them, the code refers to them by these exact names (see [Customizing the look and the sounds](#-customizing-the-look-and-the-sounds)). The character-sheet template, `Ficha_CoC_en.xlsx`, is a fully English translation of the original — feel free to rename it once it's in your Google Drive, since the bot only reads what's written inside each tab, not the file's name.
 
 ---
 
@@ -220,9 +220,7 @@ To read the spreadsheet and also write `/register` links back into it, the bot n
 
 ## Step 5 — Prepare the character-sheet spreadsheet
 
-> 💡 **A ready-made character sheet template is included in this repository** (`Ficha-CoC-modelo.xlsx`), created by **Alan** 🏊‍♂️. It's **fully automatic**: Hit Points, Sanity, attributes and skills already come with the calculations built in — just duplicate it and fill in your investigator's data and the rest adjusts itself. Download the file, upload it to your Google Drive, open it with Google Sheets (right-click → *Open with* → *Google Sheets*) and follow from step 5.1 below to grant access.
->
-> ⚠️ **Language note:** the provided template — and the bot's text-pattern parsing in `syncCharacter()` — use Portuguese-language labels and abbreviations (`Nome:` for "Name:", `Sorte` for "Luck", `Sanidade`/`Atual` for "Sanity"/"Current", and the attribute abbreviations `FOR/DES/INT/CON/APA/POD/TAM/EDU` for STR/DEX/INT/CON/APP/POW/SIZ/EDU). This is a straight code translation of the original project, not a re-localization of the spreadsheet `(comming soon)` template: if you want an all-English sheet, you'll need to relabel the template yourself and update the matching patterns in `syncCharacter()` (in `index.js`) to your new labels.
+> 💡 **A ready-made character sheet template is included in this repository** (`Ficha_CoC_en.xlsx`), based on the one created by **Alan** 🏊‍♂️ and fully translated to English. It's **fully automatic**: Hit Points, Sanity, attributes and skills already come with the calculations built in — just duplicate it and fill in your investigator's data and the rest adjusts itself. Download the file, upload it to your Google Drive, open it with Google Sheets (right-click → *Open with* → *Google Sheets*) and follow from step 5.1 below to grant access.
 >
 > In some cases a minor visual glitch can show up on the attributes — a black line appearing on some cells for some reason — but it's purely cosmetic and doesn't affect the calculations or how the bot reads the sheet.
 
@@ -254,17 +252,17 @@ The bot doesn't use fixed cell positions (with one exception): it looks for text
 
 | What | How the bot finds it | Example |
 |---|---|---|
-| **One character sheet per tab** | Each spreadsheet tab = one investigator. The tab name is what shows up in `/register`. | tab `Ficha 1 (Arthur)` |
-| **Character name** | A cell reading exactly `Nome:` with the value up to 3 columns to the right. | `B3 = Nome:` · `D3 = Arthur Wallace` |
-| **Skills** | Text with the percentage in parentheses. The value sits 2 columns to the right (or 1, if the 2nd is empty). | `B12 = Psicologia (10%)` · `D12 = 45` |
-| **Attributes** | A cell with exactly `FOR`, `DES`, `INT`, `CON`, `APA`, `POD`, `TAM` or `EDU`, value 1 column to the right. | `B5 = FOR` · `C5 = 60` |
-| **Luck** | A cell with exactly `Sorte`, value 1 or 2 columns to the right. | `B9 = Sorte` · `C9 = 55` |
-| **Sanity** | Read from cell **M8**. If there's no number there, the bot looks for an `Atual` label within the 3 rows below the word `Sanidade`. | `M8 = 65` |
+| **One character sheet per tab** | Each spreadsheet tab = one investigator. The tab name is what shows up in `/register`. | tab `Character Sheet 1 (Arthur)` |
+| **Character name** | A cell reading exactly `Name:` with the value up to 3 columns to the right. | `B3 = Name:` · `D3 = Arthur Wallace` |
+| **Skills** | Text with the percentage in parentheses. The value sits 2 columns to the right (or 1, if the 2nd is empty). | `B12 = Psychology (10%)` · `D12 = 45` |
+| **Attributes** | A cell with exactly `STR`, `DEX`, `INT`, `CON`, `APP`, `POW`, `SIZ` or `EDU`, value 1 column to the right. | `B5 = STR` · `C5 = 60` |
+| **Luck** | A cell with exactly `Luck`, value 1 or 2 columns to the right. | `B9 = Luck` · `C9 = 55` |
+| **Sanity** | Read from cell **M8**. If there's no number there, the bot looks for a `Current` label within the 3 rows below the word `Sanity`. | `M8 = 65` |
 
 Things to watch out for:
 
 - The **value** needs to be a real number, not text. `45` works; `45%` doesn't.
-- The skill name is whatever's left after removing the parentheses — `Lutar (Briga) (25%)` becomes **`Lutar (Briga)`** in autocomplete.
+- The skill name is whatever's left after removing the parentheses — `Fighting (Brawl) (25%)` becomes **`Fighting (Brawl)`** in autocomplete.
 - Nothing past column **P** or row **100** is read.
 - The sheet is read **once**, on `/register`. Changed the spreadsheet? Just run `/register` again.
 
@@ -329,7 +327,7 @@ Spreadsheet "CoC Sheets" loaded successfully!
 Registrations loaded from the spreadsheet: 0 user → character link(s).
 ```
 
-The very first time, the bot creates a **Registrations** tab in the spreadsheet on its own (with the `UserID` and `CharacterSheet` columns) to store `/register` links — you don't need to create that tab by hand. On later startups, you'll also see one line per already-registered character, like `Character sheet "Ficha 1 (Arthur)" re-synced.`, confirming players won't need to run `/register` again.
+The very first time, the bot creates a **Registrations** tab in the spreadsheet on its own (with the `UserID` and `CharacterSheet` columns) to store `/register` links — you don't need to create that tab by hand. On later startups, you'll also see one line per already-registered character, like `Character sheet "Character Sheet 1 (Arthur)" re-synced.`, confirming players won't need to run `/register` again.
 
 🎉 **The bot is running.** Leave this terminal window open — closing the terminal shuts the bot down.
 
@@ -387,7 +385,7 @@ If nothing shows up: right-click the source → **Interact**, then **Refresh cac
 Each player runs this once, at the start:
 
 ```
-/register character: Ficha 1 (Arthur)
+/register character: Character Sheet 1 (Arthur)
 ```
 
 The field autocompletes with the spreadsheet's tab names. The reply is private (only the player sees it).
@@ -520,7 +518,7 @@ const ws = new WebSocket('wss://your-app.onrender.com');
 ```
 ├── index.js           # the bot: Discord, Google Sheets (read and write), and the WebSocket server
 ├── overlayOBS.html    # the overlay that goes in OBS (HTML, CSS and JS in a single file)
-├── Ficha-CoC-modelo.xlsx  # automatic character-sheet template (created by Alan) — HP, Sanity and skills calculate themselves
+├── Ficha_CoC_en.xlsx  # automatic character-sheet template (English version, based on Alan's original) — HP, Sanity and skills calculate themselves
 ├── package.json       # dependency list
 ├── .env               # your secret keys (you create this, never push it to GitHub)
 ├── crit.mp3           # critical-success sound
@@ -547,7 +545,7 @@ Feel free to ask — the whole point of this tool is to make life easier for eve
 
 ## 🏊‍♂️ Credits
 
-- **Alan** — created `Ficha-CoC-modelo.xlsx`, the investigator sheet template used by this project. It's fully automatic: it fills in Hit Points, Sanity, attributes and skills on its own from the character's basic data, with no formulas to touch.
+- **Alan** — created the original investigator sheet template used by this project (translated to English here as `Ficha_CoC_en.xlsx`). It's fully automatic: it fills in Hit Points, Sanity, attributes and skills on its own from the character's basic data, with no formulas to touch.
 
 ---
 
