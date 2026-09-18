@@ -57,7 +57,7 @@ If your table uses the Rollem bot for damage rolls or generic dice (like `1d20` 
 ## 🔄 How it works
 
 ```
-  Google Sheets       ◄──reads sheets, reads/writes registrations──►  ┌─────────────┐
+  Google Sheets       ◄──reads sheets, reads/writes registrations──►   ┌─────────────┐
                                                                        │             │
   Discord (/roll, /register) ─────────────────────────────────────────►│   index.js  │
                                                                        │  (the bot)  │
@@ -243,7 +243,7 @@ Look at the spreadsheet's URL:
 
 ```
 https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz123456/edit?usp=sharing
-                                      └─────────── this is the ID ─────────┘
+                                      └───────── this is the ID ───────┘
 ```
 
 Copy **just the part between `/d/` and `/edit`** and paste it into your notepad under `SPREADSHEET_ID`.
