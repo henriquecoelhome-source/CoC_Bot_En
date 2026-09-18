@@ -38,7 +38,7 @@ Below you can see what the overlay looks like in OBS (images are from the [Portu
 **Rolls made natively by the bot:**
 Automatically calculates the success level (Extreme, Hard, Regular, Failure or Fumble) and applies colors matching the Call of Cthulhu 7th edition results, including support for Advantage and Disadvantage.
 
-![Example of rolls made with the bot](assets/exemplo1.png)
+![Example of rolls made with the bot](assets/preview1.png)
 
 **How rolls show up on Discord:**
 
