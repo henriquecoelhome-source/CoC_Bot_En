@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <style>
@@ -15,10 +15,10 @@
             box-sizing: border-box;
         }
 
-        /* O tamanho de exibição é definido nas Propriedades da fonte de
-           Browser, no OBS (Largura/Altura). Este container ocupa 100% do
-           espaço reservado a ele — ajuste as dimensões da fonte no OBS
-           conforme o espaço disponível na cena. */
+        /* The display size is set in OBS's Browser Source Properties
+           (Width/Height). This container fills 100% of the space given
+           to it — adjust the source's dimensions in OBS to match the
+           space available in your scene. */
         #chat-container {
             width: 100%;
             height: 100%;
@@ -30,74 +30,74 @@
         }
 
         :root {
-            --cor-normal: #ffb648;
-            --cor-crit: #2ee673;
-            --cor-falha: #ff4d5e;
-            --cor-texto: #f2f2f2;
-            --cor-texto-mudo: #a0a0a5;
-            --cor-fundo: rgba(20, 20, 22, 0.92);
+            --color-normal: #ffb648;
+            --color-crit: #2ee673;
+            --color-fail: #ff4d5e;
+            --color-text: #f2f2f2;
+            --color-text-muted: #a0a0a5;
+            --color-bg: rgba(20, 20, 22, 0.92);
         }
 
-        .mensagem {
-            --cor-evento: var(--cor-normal);
+        .message {
+            --color-event: var(--color-normal);
             font-family: 'Segoe UI', 'Inter', Arial, sans-serif;
-            background-color: var(--cor-fundo);
-            border-left: 3px solid var(--cor-evento);
+            background-color: var(--color-bg);
+            border-left: 3px solid var(--color-event);
             border-radius: 5px;
             padding: 7px 10px;
             box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
-            animation: aparecer 0.3s ease-out forwards;
+            animation: appear 0.3s ease-out forwards;
             flex-shrink: 0;
         }
 
-        .mensagem.evento-critico { --cor-evento: var(--cor-crit); }
-        .mensagem.evento-falha { --cor-evento: var(--cor-falha); }
+        .message.event-critical { --color-event: var(--color-crit); }
+        .message.event-fail { --color-event: var(--color-fail); }
 
-        .cabecalho {
+        .header-row {
             display: flex;
             align-items: center;
             gap: 4px;
             margin-bottom: 2px;
         }
 
-        .dado-icone {
+        .dice-icon {
             font-size: 13px;
             line-height: 1;
         }
 
-        .jogador {
+        .player {
             font-weight: 700;
             font-size: 12px;
-            color: var(--cor-texto-mudo);
+            color: var(--color-text-muted);
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
 
-        .linha-principal {
+        .main-row {
             display: flex;
             align-items: baseline;
             justify-content: space-between;
             gap: 8px;
         }
 
-        .pericia {
+        .skill {
             font-size: 15px;
             font-weight: 600;
-            color: var(--cor-texto);
+            color: var(--color-text);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
 
-        .valor-final {
+        .final-value {
             font-family: 'Courier New', Courier, monospace;
             font-size: 24px;
             font-weight: 700;
-            color: var(--cor-evento);
+            color: var(--color-event);
             line-height: 1;
         }
 
-        .linha-secundaria {
+        .secondary-row {
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -105,9 +105,9 @@
             gap: 6px;
         }
 
-        .alvo {
+        .target {
             font-size: 12px;
-            color: var(--cor-texto-mudo);
+            color: var(--color-text-muted);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -116,8 +116,8 @@
         .status {
             font-size: 11px;
             font-weight: 700;
-            color: var(--cor-evento);
-            border: 1px solid var(--cor-evento);
+            color: var(--color-event);
+            border: 1px solid var(--color-event);
             border-radius: 20px;
             padding: 1px 7px;
             text-transform: uppercase;
@@ -125,18 +125,18 @@
             white-space: nowrap;
         }
 
-        .texto-rollem {
+        .rollem-text {
             font-family: 'Courier New', Courier, monospace;
             font-size: 16px;
-            color: var(--cor-texto);
+            color: var(--color-text);
         }
 
-        .numero-destaque {
-            color: var(--cor-evento);
+        .highlight-number {
+            color: var(--color-event);
             font-weight: 700;
         }
 
-        @keyframes aparecer {
+        @keyframes appear {
             from { opacity: 0; transform: translateY(8px); }
             to { opacity: 1; transform: translateY(0); }
         }
@@ -148,131 +148,134 @@
 
     <script>
         const chatContainer = document.getElementById('chat-container');
-        const maxMensagens = 6; // Número de rolagens mantidas visíveis simultaneamente.
+        const maxMessages = 6; // Number of roll cards kept visible on screen at once.
 
-        const sonsDeRolagem = ['diceroll1.mp3', 'diceroll2.mp3', 'diceroll3.mp3'];
+        const rollSounds = ['diceroll1.mp3', 'diceroll2.mp3', 'diceroll3.mp3'];
 
         /**
-         * Reproduz um arquivo de áudio e resolve a Promise quando a
-         * reprodução termina (ou falha) — garante que a fila de áudio
-         * nunca trave caso o arquivo esteja ausente ou inválido.
+         * Plays an audio file and resolves the Promise once playback ends
+         * (or fails) — this guarantees the audio queue never gets stuck if
+         * the file is missing or invalid.
          */
-        function tocarSom(src, volume) {
+        function playSound(src, volume) {
             return new Promise((resolve) => {
                 const audio = new Audio(src);
                 audio.volume = volume;
-                const finalizar = () => resolve();
-                audio.addEventListener('ended', finalizar, { once: true });
+                const finish = () => resolve();
+                audio.addEventListener('ended', finish, { once: true });
                 audio.addEventListener('error', () => {
-                    console.warn(`[overlay] Não consegui carregar o áudio: ${src}`);
-                    finalizar();
+                    console.warn(`[overlay] Couldn't load audio file: ${src}`);
+                    finish();
                 }, { once: true });
-                audio.play().catch((erro) => {
-                    console.warn(`[overlay] play() bloqueado/rejeitado para ${src}:`, erro);
-                    finalizar();
+                audio.play().catch((err) => {
+                    console.warn(`[overlay] play() blocked/rejected for ${src}:`, err);
+                    finish();
                 });
             });
         }
 
         /**
-         * Reproduz o som de rolagem (sorteado entre as variações
-         * disponíveis) e, em sequência, o som de crítico ou falha
-         * crítica, caso aplicável ao evento recebido.
+         * Plays the roll sound (randomly picked among the available
+         * variations) and, right after, the critical-success or fumble
+         * sound, if that applies to the received event.
          */
-        async function tocarSequenciaDeAudio(evento) {
-            const somRolagem = sonsDeRolagem[Math.floor(Math.random() * sonsDeRolagem.length)];
-            await tocarSom(somRolagem, 0.8);
+        async function playAudioSequence(eventKind) {
+            const rollSound = rollSounds[Math.floor(Math.random() * rollSounds.length)];
+            await playSound(rollSound, 0.8);
 
-            if (evento === 'crit') {
-                await tocarSom('crit.mp3', 0.9);
-            } else if (evento === 'fail') {
-                await tocarSom('falhacrit.mp3', 0.9);
+            if (eventKind === 'crit') {
+                await playSound('crit.mp3', 0.9);
+            } else if (eventKind === 'fail') {
+                await playSound('falhacrit.mp3', 0.9);
             }
         }
 
-        function escapeHtml(texto) {
-            if (texto === undefined || texto === null) return '';
-            return String(texto)
+        function escapeHtml(text) {
+            if (text === undefined || text === null) return '';
+            return String(text)
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
         }
 
-        function classeEvento(evento) {
-            if (evento === 'crit') return 'evento-critico';
-            if (evento === 'fail') return 'evento-falha';
+        function eventClass(eventKind) {
+            if (eventKind === 'crit') return 'event-critical';
+            if (eventKind === 'fail') return 'event-fail';
             return '';
         }
 
-        function renderizarMensagem(dados) {
+        function renderMessage(data) {
             const div = document.createElement('div');
-            div.className = `mensagem ${classeEvento(dados.evento)}`.trim();
+            div.className = `message ${eventClass(data.event)}`.trim();
 
-            if (dados.tipo === 'comando') {
-                // Mensagem estruturada originada do /rl: perícia, alvo e
-                // status em campos separados, sem parênteses ou setas
-                // embutidos no texto.
-                const sufixoVantagem = dados.vantagem ? ` · ${escapeHtml(dados.vantagem)}` : '';
+            if (data.type === 'command') {
+                // Structured message coming from /roll: skill, target and
+                // status as separate fields, with no parentheses or arrows
+                // embedded in the text.
+                const advantageSuffix = data.advantage ? ` · ${escapeHtml(data.advantage)}` : '';
                 div.innerHTML = `
-                    <div class="cabecalho">
-                        <span class="dado-icone">🎲</span>
-                        <span class="jogador">${escapeHtml(dados.jogador)}</span>
+                    <div class="header-row">
+                        <span class="dice-icon">🎲</span>
+                        <span class="player">${escapeHtml(data.player)}</span>
                     </div>
-                    <div class="linha-principal">
-                        <span class="pericia">${escapeHtml(dados.pericia)}</span>
-                        <span class="valor-final">${escapeHtml(dados.valor)}</span>
+                    <div class="main-row">
+                        <span class="skill">${escapeHtml(data.skill)}</span>
+                        <span class="final-value">${escapeHtml(data.value)}</span>
                     </div>
-                    <div class="linha-secundaria">
-                        <span class="alvo">Alvo ${escapeHtml(dados.alvo)}${sufixoVantagem}</span>
-                        <span class="status">${escapeHtml(dados.status)}</span>
+                    <div class="secondary-row">
+                        <span class="target">Target ${escapeHtml(data.target)}${advantageSuffix}</span>
+                        <span class="status">${escapeHtml(data.status)}</span>
                     </div>
                 `;
             } else {
-                // Mensagem crua vinda do bot "rollem": remove a formatação
-                // do Discord e destaca os números, preservando o mesmo
-                // layout visual do card estruturado.
-                const textoLimpo = (dados.resultado || '').replace(/[*_~`]/g, '');
-                const textoFormatado = escapeHtml(textoLimpo).replace(/([0-9]+)/g, '<span class="numero-destaque">$1</span>');
+                // Raw message from the "rollem" bot: strips Discord
+                // formatting and highlights the numbers, keeping the same
+                // visual layout as the structured card.
+                const cleanText = (data.result || '').replace(/[*_~`]/g, '');
+                const formattedText = escapeHtml(cleanText).replace(/([0-9]+)/g, '<span class="highlight-number">$1</span>');
                 div.innerHTML = `
-                    <div class="cabecalho">
-                        <span class="dado-icone">🎲</span>
-                        <span class="jogador">${escapeHtml(dados.jogador)}</span>
+                    <div class="header-row">
+                        <span class="dice-icon">🎲</span>
+                        <span class="player">${escapeHtml(data.player)}</span>
                     </div>
-                    <div class="texto-rollem">${textoFormatado}</div>
+                    <div class="rollem-text">${formattedText}</div>
                 `;
             }
 
             chatContainer.appendChild(div);
-            if (chatContainer.children.length > maxMensagens) {
+            if (chatContainer.children.length > maxMessages) {
                 chatContainer.removeChild(chatContainer.firstChild);
             }
         }
 
-        function conectar() {
+        function connect() {
+            // Replace this address with your own bot server's address
+            // (see the README — use ws:// for local, wss:// for a hosted
+            // server such as Render).
             const ws = new WebSocket('wss://coc-bot-nj88.onrender.com');
 
             ws.onmessage = function(event) {
-                const dados = JSON.parse(event.data);
+                const data = JSON.parse(event.data);
 
-                if (dados.tipo === 'historico') {
-                    // Backlog de rolagens que aconteceram enquanto o overlay
-                    // estava desconectado. Renderiza cada uma pra recuperar
-                    // o que foi perdido, mas sem tocar os sons de novo (senão
-                    // tocariam todos de uma vez ao reconectar).
-                    dados.eventos.forEach(renderizarMensagem);
+                if (data.type === 'history') {
+                    // Backlog of rolls that happened while the overlay was
+                    // disconnected. Renders each one to recover what was
+                    // missed, but without playing the sounds again (otherwise
+                    // they'd all play at once on reconnect).
+                    data.events.forEach(renderMessage);
                     return;
                 }
 
-                renderizarMensagem(dados);
-                tocarSequenciaDeAudio(dados.evento);
+                renderMessage(data);
+                playAudioSequence(data.event);
             };
 
             ws.onclose = () => {
-                setTimeout(conectar, 2000);
+                setTimeout(connect, 2000);
             };
         }
 
-        conectar();
+        connect();
     </script>
 </body>
 </html>
