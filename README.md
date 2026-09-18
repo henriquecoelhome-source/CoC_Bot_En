@@ -57,15 +57,15 @@ If your table uses the Rollem bot for damage rolls or generic dice (like `1d20` 
 ## 🔄 How it works
 
 ```
-  Google Sheets       ◄──reads sheets, reads/writes registrations──►   ┌─────────────┐
+  Google Sheets ◄── reads sheets, reads/writes registrations ─────────►┌─────────────┐
                                                                        │             │
   Discord (/roll, /register) ─────────────────────────────────────────►│   index.js  │
                                                                        │  (the bot)  │
-  Rollem bot (loose rolls) ──────────────────────────────────────────► │             │
+  Rollem bot (loose rolls) ───────────────────────────────────────────►│             │
                                                                        └──────┬──────┘
                                                                               │ WebSocket (port 8080)
                                                                               ▼
-                                              overlayOBS.html  ──►  your OBS stream
+                                                                       overlayOBS.html  ──►  your OBS stream
 ```
 
 `index.js` runs on your computer (or a server). It talks to Discord and to Google (reading investigators' character sheets, and also reading/writing `/register` links to the Registrations tab), and relays every roll to `overlayOBS.html`, which you add to OBS as a browser source. **If `index.js` is off, the overlay stays empty.**
