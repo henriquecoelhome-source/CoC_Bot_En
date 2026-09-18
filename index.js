@@ -4,25 +4,15 @@ const WebSocket = require('ws');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 
-// ---------------------------------------------------------------------
-// WebSocket server — the event channel for the OBS overlay.
-// Every roll detected (via /roll or by watching the "rollem" bot) is
-// relayed in real time to whatever clients are connected on this port.
-// ---------------------------------------------------------------------
+// WebSocket server for the OBS overlay. Every roll (/roll or picked up
+// from the "rollem" bot) gets relayed here in real time.
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: PORT });
 console.log(`WebSocket server started — listening for overlay connections on port ${PORT}.`);
 
-// ---------------------------------------------------------------------
-// Event history — a small buffer of the last rolls that were broadcast.
-// Without this, an event only ever reaches whoever was already connected
-// at the exact moment of the broadcast: if the overlay drops and
-// reconnects (network hiccup, OBS browser-source reload, etc.), anything
-// that happened in between is lost, because the server never kept
-// anything around, it just relayed. On connect, the overlay now gets
-// this backlog sent to it all at once.
-// ---------------------------------------------------------------------
-const HISTORY_BUFFER_MAX = 6; // same value as maxMessages in the overlay
+// Small in-memory buffer so a reconnecting overlay (browser source reload,
+// network hiccup, etc.) doesn't miss whatever happened while it was down.
+const HISTORY_BUFFER_MAX = 6; // matches maxMessages on the overlay side
 let eventHistoryBuffer = [];
 
 function broadcastEvent(event) {
@@ -35,11 +25,9 @@ function broadcastEvent(event) {
         }
     });
 
-    // Writes to the persistent spreadsheet history (the "Rolls" sheet) in
-    // parallel. No `await` here on purpose: this is a synchronous function
-    // called from places where we don't want to delay either the overlay
-    // broadcast or the Discord command reply — the write runs in the
-    // background, and any error just goes to the log (see the function).
+    // Fire-and-forget write to the spreadsheet history. No await — don't
+    // want a slow Sheets call blocking the overlay broadcast or the
+    // Discord reply. Errors just get logged.
     recordRollInHistory(event);
 }
 
@@ -53,18 +41,9 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// ---------------------------------------------------------------------
-// Google Sheets integration — the data source for character sheets, and
-// now also where user → character links get saved.
-//
-// Authentication used to be just an API key, which is read-only. To
-// write data back to the spreadsheet (the registration persistence,
-// right below) the bot needs a Google Service Account with edit
-// permission — the credentials come from environment variables, never
-// hardcoded here. See the README for the step-by-step on generating
-// those credentials and sharing the spreadsheet with the Service
-// Account.
-// ---------------------------------------------------------------------
+// Sheets auth uses a Service Account (not just an API key) since we need
+// write access now for registrations. Creds come from env vars — see
+// README for how to generate them and share the sheet with the account.
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const serviceAccountAuth = new JWT({
     email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -73,32 +52,20 @@ const serviceAccountAuth = new JWT({
 });
 const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
 
-// userCharacters:      maps a Discord user ID to their linked character sheet (tab).
-// characterCache:      cache of the attributes/skills already read from each sheet.
-// characterNameCache:  cache of the character's name, extracted from the sheet itself.
-const userCharacters = {};
-const characterCache = {};
-const characterNameCache = {};
+const userCharacters = {};     // Discord user ID -> linked character sheet tab
+const characterCache = {};     // attributes/skills already read from each sheet
+const characterNameCache = {}; // character name pulled from the sheet itself
 
-// ---------------------------------------------------------------------
-// Persistence of user → character links (the /register command).
+// --- Registration persistence (/register) ---------------------------
+// userCharacters used to be RAM-only, so every restart/redeploy wiped it
+// (Render's disk is ephemeral too). Now it's backed by a "Registrations"
+// tab so it survives crashes and redeploys.
 //
-// userCharacters used to live only in memory (the process's RAM): any
-// restart of the Node process wiped it out without a trace — including
-// every new deploy on Render, since local disk there is ephemeral (it
-// disappears on every redeploy, not just when the service sleeps). So
-// these links now live in their own sheet tab ("Registrations"), which
-// is external to the server: it survives any redeploy, crash, or sleep
-// cycle, because it doesn't depend on the bot's disk.
-//
-// NOTE ON COMPATIBILITY: this English build uses its own sheet-tab
-// names and column headers (see the constants below), separate from
-// the Portuguese production build ('Registros' / 'Rolagens'). If you
-// point this file at a spreadsheet that a Portuguese build already
-// wrote to, change REGISTRATIONS_SHEET_TITLE and ROLL_HISTORY_SHEET_TITLE
-// back to the original Portuguese names first — otherwise this build
-// will create new, empty tabs instead of reusing the existing data.
-// ---------------------------------------------------------------------
+// Heads up: this build uses its own tab/column names, separate from the
+// Portuguese production build ("Registros" / "Rolagens"). If pointing
+// this at a spreadsheet that build already wrote to, switch
+// REGISTRATIONS_SHEET_TITLE / ROLL_HISTORY_SHEET_TITLE back to those
+// names first, or you'll just create new empty tabs.
 const REGISTRATIONS_SHEET_TITLE = 'Registrations';
 
 async function getOrCreateRegistrationsSheet() {
@@ -141,32 +108,20 @@ async function saveRegistration(userId, characterSheet) {
     }
 }
 
-// ---------------------------------------------------------------------
-// Persistent roll history (the "Rolls" sheet).
+// --- Persistent roll history ("Rolls" tab) ---------------------------
+// Different thing from eventHistoryBuffer above — that's just 6 items
+// for overlay reconnects and dies on restart. This is the full history,
+// one row per roll, so it survives restarts/crashes/redeploys.
 //
-// `eventHistoryBuffer` above is a different thing: a small buffer (6
-// items) just to resend the latest rolls to whoever just connected to
-// the overlay, and it's lost on every bot restart because it only lives
-// in RAM. This section is the real history — every roll (/roll and
-// Rollem) is written to its own sheet tab, the same way the
-// "Registrations" tab works, so it survives restarts, crashes, and
-// redeploys.
-//
-// To keep the tab from growing forever, the bot only keeps the last
-// ROLL_HISTORY_MAX rows. Cleanup runs in batches of
-// ROLL_HISTORY_CLEANUP_BATCH instead of deleting one row every single
-// roll — that avoids spending an extra API call on every /roll just to
-// keep the total exactly round (the Google Sheets API has a
-// requests-per-minute quota, and that adds up fast at a lively table).
-// In practice the tab can sit a little above the limit for a moment (up
-// to +ROLL_HISTORY_CLEANUP_BATCH rows) between one cleanup and the
-// next — which makes no practical difference for a roll history.
-// ---------------------------------------------------------------------
+// We only keep the last ROLL_HISTORY_MAX rows, cleaned up in batches of
+// ROLL_HISTORY_CLEANUP_BATCH instead of trimming on every single roll —
+// Sheets has a requests/min quota and that adds up fast at a busy table.
+// The tab can sit a bit above the limit between cleanups, which is fine.
 const ROLL_HISTORY_SHEET_TITLE = 'Rolls';
 const ROLL_HISTORY_MAX = 1000; // lower this if the spreadsheet gets too heavy
-const ROLL_HISTORY_CLEANUP_BATCH = 50; // deleted in blocks, not row by row
+const ROLL_HISTORY_CLEANUP_BATCH = 50;
 
-let rollHistoryRowCount = 0; // in-memory count — avoids re-reading the whole sheet on every roll
+let rollHistoryRowCount = 0; // kept in memory so we don't re-read the sheet every roll
 
 async function getOrCreateRollHistorySheet() {
     let sheet = doc.sheetsByTitle[ROLL_HISTORY_SHEET_TITLE];
@@ -180,14 +135,8 @@ async function getOrCreateRollHistorySheet() {
     return sheet;
 }
 
-/**
- * Reads the history sheet exactly once, at bot startup, just to find out
- * how many rows already exist. After that the count is kept purely in
- * memory (incremented on every write, decremented on every cleanup), so
- * the bot never has to re-read the whole sheet again just to know its
- * size — that's what lets it decide "do I need to clean up?" without
- * spending a read call on every single roll.
- */
+// Reads the row count once at startup, then it's just tracked in memory
+// from there (incremented on write, decremented on cleanup).
 async function initRollHistoryRowCount() {
     try {
         const sheet = await getOrCreateRollHistorySheet();
@@ -199,18 +148,10 @@ async function initRollHistoryRowCount() {
     }
 }
 
-/**
- * Deletes the oldest overflow in one batch, once the sheet goes past
- * ROLL_HISTORY_MAX + ROLL_HISTORY_CLEANUP_BATCH rows. The oldest rows
- * are always the ones at the top of the sheet (right below the header),
- * so we just grab the first `overflow` rows.
- *
- * Deletes back-to-front within the batch (from the last fetched row to
- * the first): deleting a row shifts up only the rows below it in the
- * sheet, so deleting from the "lowest" row to the "highest" avoids the
- * row numbers of the rows we already fetched going stale partway
- * through.
- */
+// Deletes the oldest overflow in one batch once we're past MAX + BATCH.
+// Oldest rows are always at the top, right below the header. Deletes
+// back-to-front within the batch so row indices don't shift under us
+// mid-loop.
 async function trimRollHistoryIfNeeded(sheet) {
     const overflow = rollHistoryRowCount - ROLL_HISTORY_MAX;
     if (overflow < ROLL_HISTORY_CLEANUP_BATCH) return;
@@ -227,16 +168,10 @@ async function trimRollHistoryIfNeeded(sheet) {
     }
 }
 
-/**
- * Writes one row for the received event into the history sheet. Works
- * both for structured /roll events ("command", with skill, target and
- * status as separate fields) and for raw rolls captured from the Rollem
- * bot (which have no skill/target/status — just the original text).
- *
- * Called from `broadcastEvent` without `await` on purpose (see the
- * comment there) — errors here should never take down a roll, so they
- * only go to the log.
- */
+// Writes one row per event — handles both /roll (skill/target/status as
+// separate fields) and raw Rollem captures (just the original text).
+// Called without await from broadcastEvent, so failures here never block
+// a roll, just get logged.
 async function recordRollInHistory(event) {
     try {
         const sheet = await getOrCreateRollHistorySheet();
@@ -258,18 +193,9 @@ async function recordRollInHistory(event) {
     }
 }
 
-/**
- * Rebuilds, from a row in the "Rolls" sheet, the same event shape that
- * `broadcastEvent` normally receives — used to repopulate
- * `eventHistoryBuffer` (the in-RAM buffer) from what's already saved in
- * the spreadsheet as soon as the bot starts up. Without this, a process
- * restart (redeploy, crash, sleep cycle on Render) resets the in-memory
- * buffer, and the overlay only sees history again once new rolls start
- * happening — even though the spreadsheet already has it all stored.
- *
- * The "command" (/roll) vs "rollem" (third-party bot) distinction is
- * made by the presence of the Skill column, which only /roll rolls fill in.
- */
+// Rebuilds an event object from a "Rolls" row, used to repopulate
+// eventHistoryBuffer on startup so the overlay isn't blank right after a
+// restart. Skill column present = it was a /roll; empty = Rollem capture.
 function eventFromHistoryRow(row) {
     const player = row.get('Player') || '';
     const skill = row.get('Skill') || '';
@@ -278,10 +204,9 @@ function eventFromHistoryRow(row) {
     const status = row.get('Status') || '';
 
     if (skill) {
-        // Structured /roll event: the Status column holds the raw result
-        // text ("CRITICAL SUCCESS (01)", "FUMBLE", "...SUCCESS"), not
-        // 'crit'/'fail' directly (see recordRollInHistory) — so the event
-        // type is inferred from that text.
+        // For /roll rows, Status holds the raw text ("CRITICAL SUCCESS (01)",
+        // "FUMBLE", "...SUCCESS") rather than crit/fail directly, so we
+        // infer the event type from it.
         let event = 'normal';
         if (/critical/i.test(status)) event = 'crit';
         else if (/fumble/i.test(status)) event = 'fail';
@@ -298,8 +223,7 @@ function eventFromHistoryRow(row) {
         };
     }
 
-    // Raw roll from the "rollem" bot: here the Status column already
-    // holds 'Critical' / 'Fumble' / '' directly.
+    // Rollem rows store Status as 'Critical' / 'Fumble' / '' directly.
     let event = 'normal';
     if (status === 'Critical') event = 'crit';
     else if (status === 'Fumble') event = 'fail';
@@ -307,14 +231,8 @@ function eventFromHistoryRow(row) {
     return { type: 'rollem', player, result, event };
 }
 
-/**
- * Repopulates `eventHistoryBuffer` with the last HISTORY_BUFFER_MAX rolls
- * already saved in the "Rolls" sheet, read directly from the spreadsheet
- * (offset by the total row count already counted in
- * initRollHistoryRowCount, so there's no need to re-read the whole
- * sheet). Called once, at bot startup — after that the buffer is
- * maintained normally by `broadcastEvent` on every new roll.
- */
+// Pulls the last HISTORY_BUFFER_MAX rolls straight from the sheet at
+// startup (using the row count we already have, so no full re-read).
 async function loadRecentHistoryFromSheet() {
     try {
         const sheet = await getOrCreateRollHistorySheet();
@@ -328,16 +246,10 @@ async function loadRecentHistoryFromSheet() {
 }
 
 /**
- * Reads the `sheetTitle` tab and extracts attributes, skills, Luck,
- * Sanity and the character's name, populating characterCache /
- * characterNameCache.
- *
- * Extraction is done by recognizing text patterns (labels and markers
- * like "%"), not by fixed cell position — this makes reading resilient
- * to small layout differences between character sheets.
- *
- * @param {string} sheetTitle - Title of the tab for this character sheet.
- * @returns {Promise<boolean>} true if the sync completed successfully.
+ * Reads a character sheet tab and pulls attributes, skills, Luck, Sanity
+ * and the character's name into characterCache / characterNameCache.
+ * Matches by text pattern (labels, "%") instead of fixed cell position,
+ * so it tolerates small layout differences between sheets.
  */
 async function syncCharacter(sheetTitle) {
     try {
@@ -347,25 +259,20 @@ async function syncCharacter(sheetTitle) {
         await sheet.loadCells('A1:R100');
         const stats = {};
 
-        // "Current Sanity" has a fixed position on this sheet (cell M8).
-        const sanityCell = sheet.getCell(7, 12); // row 8, column M (0-indexed)
+        // "Current Sanity" lives at a fixed cell on this template (M8).
+        const sanityCell = sheet.getCell(7, 12);
         if (typeof sanityCell.value === 'number') {
             stats['Sanity'] = sanityCell.value;
         }
 
-        // Skills follow the pattern "Name (xx%)" — e.g. "Fighting (Brawl) (25%)",
-        // "Psychology (10%)", "Dodge (half DEX%)". We identify the cell by
-        // this text pattern (rather than by position/column), since
-        // attributes (STR, DEX...) and other fields don't follow this
-        // notation.
+        // Skills look like "Name (xx%)" — "Fighting (Brawl) (25%)",
+        // "Psychology (10%)", "Dodge (half DEX%)".
         const skillPatternTest = /\([^()]*%[^()]*\)/;
         const skillPatternStrip = /\([^()]*%[^()]*\)/g;
 
-        // Attributes: a cell whose value matches exactly one of these
-        // abbreviations — STR/DEX/INT/CON/APP/POW/SIZ/EDU — matching what's
-        // printed on this build's English character sheet template
-        // (Ficha_CoC_en.xlsx). Change this pattern if your own sheet
-        // template uses different abbreviations.
+        // Attributes: exact match on STR/DEX/INT/CON/APP/POW/SIZ/EDU, per
+        // this template (Ficha_CoC_en.xlsx). Adjust if your sheet uses
+        // different abbreviations.
         const attributePattern = /^(STR|DEX|INT|CON|APP|POW|SIZ|EDU)$/i;
 
         for (let r = 0; r < 100; r++) {
@@ -376,10 +283,8 @@ async function syncCharacter(sheetTitle) {
                 const cellText = cell.value.replace(/\n/g, ' ').trim();
                 if (!cellText) continue;
 
-                // Character name: the label "Name:" occupies one cell and
-                // the value (in a merged cell, e.g. D3:F3) sits offset to
-                // the right. We try a few offsets until we find a
-                // non-empty string.
+                // "Name:" label with the value in a merged cell to the
+                // right — try a few offsets until something's there.
                 if (/^name:?$/i.test(cellText)) {
                     for (const offset of [1, 2, 3]) {
                         const valueCell = sheet.getCell(r, c + offset);
@@ -399,10 +304,8 @@ async function syncCharacter(sheetTitle) {
                         .trim();
 
                     if (statName) {
-                        // The skill's value is usually 2 columns to the right
-                        // of the name (the in-between cell is empty due to
-                        // merging). If not found, try 1 column to the right
-                        // as a fallback.
+                        // Value's usually 2 cols right (merged cell in
+                        // between); fall back to 1 col if not found.
                         let value;
                         for (const offset of [2, 1]) {
                             const valueCell = sheet.getCell(r, c + offset);
@@ -416,7 +319,7 @@ async function syncCharacter(sheetTitle) {
                     continue;
                 }
 
-                // Attributes (STR, DEX, INT, CON, APP, POW, SIZ, EDU)
+                // Attributes
                 if (attributePattern.test(cellText)) {
                     const valueCell = sheet.getCell(r, c + 1);
                     if (valueCell && typeof valueCell.value === 'number') {
@@ -437,12 +340,10 @@ async function syncCharacter(sheetTitle) {
                     continue;
                 }
 
-                // Sanity: "Sanity" is just the section title; the
-                // "Current" value sits on one of the rows right below it
-                // (the same "Current" label also appears in the Hit
-                // Points and Magic Points sections, which is why the
-                // search is restricted to the immediate neighborhood of
-                // the title).
+                // Sanity: "Sanity" is just the section title, the actual
+                // value is under a "Current" label a couple rows below.
+                // "Current" also shows up under HP/MP, hence the narrow
+                // search radius.
                 if (/^sanity$/i.test(cellText) && !stats['Sanity']) {
                     for (let r2 = r + 1; r2 <= r + 3 && r2 < 100 && !stats['Sanity']; r2++) {
                         for (let c2 = 0; c2 < 16; c2++) {
@@ -473,10 +374,8 @@ client.once('ready', async () => {
     await doc.loadInfo();
     console.log(`Spreadsheet "${doc.title}" loaded successfully!`);
 
-    // Restores the user → character links saved in the spreadsheet and
-    // re-syncs the cache for each character sheet involved, so /roll
-    // already works without anyone needing to run /register again after
-    // a restart.
+    // Restore user -> character links and re-sync each sheet involved, so
+    // /roll works right away without anyone re-running /register.
     await loadRegistrations();
     const sheetsToResync = new Set(Object.values(userCharacters));
     for (const sheetTitle of sheetsToResync) {
@@ -484,16 +383,7 @@ client.once('ready', async () => {
         console.log(ok ? `Character sheet "${sheetTitle}" re-synced.` : `Failed to re-sync "${sheetTitle}".`);
     }
 
-    // Finds out how many rows already exist in the "Rolls" sheet
-    // (creating the sheet if it doesn't exist yet), so batch cleanup
-    // already knows whether it needs to run as soon as new rolls start
-    // coming in.
     await initRollHistoryRowCount();
-
-    // Repopulates the in-RAM buffer (eventHistoryBuffer) with what was
-    // already saved in the spreadsheet, so that an overlay connecting
-    // right after a bot restart already gets the recent history — not
-    // just rolls that happen after the process comes back up.
     await loadRecentHistoryFromSheet();
 
     const commands = [
@@ -513,18 +403,10 @@ client.once('ready', async () => {
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
 });
 
-// =====================================================================
-// SOURCE 1 — Watching rolls from the "rollem" bot
-//
-// The bot listens to that third-party bot's messages in the channel,
-// parses the roll text (1d100, multiple rolls, bracket notation) and
-// classifies the result as critical, fumble, or normal before relaying
-// the event to the overlay.
-// =====================================================================
+// --- Source 1: watching rolls from the "rollem" bot -------------------
 client.on('messageCreate', async (message) => {
-  // "rollem" is the actual Discord username of the third-party dice bot
-  // being observed — keep this literal string as-is; it's not something
-  // to translate, it has to match that bot's real username.
+  // 'rollem' is that bot's actual Discord username — don't translate it,
+  // it has to match literally.
   if (message.author.username !== 'rollem') return;
 
   let player = "Investigator";
@@ -533,10 +415,9 @@ client.on('messageCreate', async (message) => {
       const originalMessage = await message.channel.messages.fetch(message.reference.messageId);
       let member = originalMessage.member;
 
-      // The fetched message doesn't always come with the member embedded
-      // (e.g. a stale cache). In that case, fetch the member directly from
-      // the guild to show the server nickname instead of the global
-      // Discord username.
+      // Cached message might not have the member attached — fetch it
+      // from the guild directly so we get the server nickname instead of
+      // falling back to the raw username.
       if (!member && message.guild) {
         try {
           member = await message.guild.members.fetch(originalMessage.author.id);
@@ -583,9 +464,7 @@ client.on('messageCreate', async (message) => {
   broadcastEvent({ type: 'rollem', player: player, result: originalText, event: eventType });
 });
 
-// =====================================================================
-// SOURCE 2 — Slash commands (/register and /roll)
-// =====================================================================
+// --- Source 2: slash commands (/register and /roll) -------------------
 client.on('interactionCreate', async interaction => {
     if (interaction.isAutocomplete() && interaction.commandName === 'roll') {
         const userId = interaction.user.id;
