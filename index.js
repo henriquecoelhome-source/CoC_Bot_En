@@ -5,63 +5,65 @@ const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 
 // ---------------------------------------------------------------------
-// Servidor WebSocket — canal de eventos para o overlay do OBS.
-// Toda rolagem de dados detectada (via /rl ou observação do bot "rollem")
-// é retransmitida em tempo real para os clientes conectados nesta porta.
+// WebSocket server — the event channel for the OBS overlay.
+// Every roll detected (via /roll or by watching the "rollem" bot) is
+// relayed in real time to whatever clients are connected on this port.
 // ---------------------------------------------------------------------
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: PORT });
-console.log(`Servidor WebSocket iniciado — aguardando conexões do overlay na porta ${PORT}.`);
+console.log(`WebSocket server started — listening for overlay connections on port ${PORT}.`);
 
 // ---------------------------------------------------------------------
-// Histórico de eventos — buffer com as últimas rolagens transmitidas.
-// Sem isso, um evento só chega a quem já estava conectado no instante
-// exato do broadcast: se o overlay cair e reconectar (queda de rede,
-// reload da fonte de navegador no OBS etc.), tudo que rolou nesse meio
-// tempo se perde, porque o servidor nunca guardava nada, só repassava.
-// Ao conectar, o overlay agora recebe esse histórico de uma vez.
+// Event history — a small buffer of the last rolls that were broadcast.
+// Without this, an event only ever reaches whoever was already connected
+// at the exact moment of the broadcast: if the overlay drops and
+// reconnects (network hiccup, OBS browser-source reload, etc.), anything
+// that happened in between is lost, because the server never kept
+// anything around, it just relayed. On connect, the overlay now gets
+// this backlog sent to it all at once.
 // ---------------------------------------------------------------------
-const HISTORICO_MAX = 6; // mesmo valor de maxMensagens no overlay
-let historicoEventos = [];
+const HISTORY_BUFFER_MAX = 6; // same value as maxMessages in the overlay
+let eventHistoryBuffer = [];
 
-function transmitirEvento(evento) {
-    historicoEventos.push(evento);
-    if (historicoEventos.length > HISTORICO_MAX) historicoEventos.shift();
+function broadcastEvent(event) {
+    eventHistoryBuffer.push(event);
+    if (eventHistoryBuffer.length > HISTORY_BUFFER_MAX) eventHistoryBuffer.shift();
 
-    wss.clients.forEach(cliente => {
-        if (cliente.readyState === WebSocket.OPEN) {
-            cliente.send(JSON.stringify(evento));
+    wss.clients.forEach(wsClient => {
+        if (wsClient.readyState === WebSocket.OPEN) {
+            wsClient.send(JSON.stringify(event));
         }
     });
 
-    // Grava no histórico persistente da planilha (aba "Rolagens") em
-    // paralelo. Sem `await` de propósito: isso é uma função síncrona
-    // chamada em pontos onde não queremos atrasar nem o broadcast pro
-    // overlay nem a resposta do comando no Discord — a gravação roda
-    // em segundo plano e qualquer erro fica só no log (ver a função).
-    registrarHistoricoRolagem(evento);
+    // Writes to the persistent spreadsheet history (the "Rolls" sheet) in
+    // parallel. No `await` here on purpose: this is a synchronous function
+    // called from places where we don't want to delay either the overlay
+    // broadcast or the Discord command reply — the write runs in the
+    // background, and any error just goes to the log (see the function).
+    recordRollInHistory(event);
 }
 
 wss.on('connection', (ws) => {
-    if (historicoEventos.length > 0) {
-        ws.send(JSON.stringify({ tipo: 'historico', eventos: historicoEventos }));
+    if (eventHistoryBuffer.length > 0) {
+        ws.send(JSON.stringify({ type: 'history', events: eventHistoryBuffer }));
     }
 });
 
-const client = new Client({ 
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] 
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
 // ---------------------------------------------------------------------
-// Integração com Google Sheets — fonte de dados das fichas de personagem
-// e, agora, também onde ficam salvos os vínculos usuário → ficha.
+// Google Sheets integration — the data source for character sheets, and
+// now also where user → character links get saved.
 //
-// Antes a autenticação era só com uma API key, que só permite leitura.
-// Para gravar dados na planilha (a persistência dos registros, logo
-// abaixo) é preciso uma Service Account do Google, com permissão de
-// edição — as credenciais vêm de variáveis de ambiente, nunca ficam
-// hardcoded aqui. Veja o README para o passo a passo de como gerar
-// essas credenciais e compartilhar a planilha com a Service Account.
+// Authentication used to be just an API key, which is read-only. To
+// write data back to the spreadsheet (the registration persistence,
+// right below) the bot needs a Google Service Account with edit
+// permission — the credentials come from environment variables, never
+// hardcoded here. See the README for the step-by-step on generating
+// those credentials and sharing the spreadsheet with the Service
+// Account.
 // ---------------------------------------------------------------------
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const serviceAccountAuth = new JWT({
@@ -71,368 +73,384 @@ const serviceAccountAuth = new JWT({
 });
 const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
 
-// userCharacters:   mapeia o ID do usuário do Discord à aba (ficha) vinculada.
-// characterCache:   cache dos atributos/perícias já lidos de cada ficha.
-// nomeFichaCache:   cache do nome do personagem extraído da própria ficha.
+// userCharacters:      maps a Discord user ID to their linked character sheet (tab).
+// characterCache:      cache of the attributes/skills already read from each sheet.
+// characterNameCache:  cache of the character's name, extracted from the sheet itself.
 const userCharacters = {};
 const characterCache = {};
-const nomeFichaCache = {};
+const characterNameCache = {};
 
 // ---------------------------------------------------------------------
-// Persistência dos vínculos usuário → ficha (comando /registrar).
+// Persistence of user → character links (the /register command).
 //
-// userCharacters vivia só em memória (RAM do processo): qualquer
-// reinício do processo Node apagava tudo sem deixar rastro — inclusive
-// todo deploy novo no Render, já que lá o disco local é efêmero (some
-// a cada redeploy, não só quando o serviço hiberna). Por isso os
-// vínculos agora moram numa aba própria da planilha ("Registros"),
-// que é externa ao servidor: sobrevive a qualquer redeploy, crash ou
-// hibernação, porque não depende do disco do bot.
+// userCharacters used to live only in memory (the process's RAM): any
+// restart of the Node process wiped it out without a trace — including
+// every new deploy on Render, since local disk there is ephemeral (it
+// disappears on every redeploy, not just when the service sleeps). So
+// these links now live in their own sheet tab ("Registrations"), which
+// is external to the server: it survives any redeploy, crash, or sleep
+// cycle, because it doesn't depend on the bot's disk.
+//
+// NOTE ON COMPATIBILITY: this English build uses its own sheet-tab
+// names and column headers (see the constants below), separate from
+// the Portuguese production build ('Registros' / 'Rolagens'). If you
+// point this file at a spreadsheet that a Portuguese build already
+// wrote to, change REGISTRATIONS_SHEET_TITLE and ROLL_HISTORY_SHEET_TITLE
+// back to the original Portuguese names first — otherwise this build
+// will create new, empty tabs instead of reusing the existing data.
 // ---------------------------------------------------------------------
-const REGISTROS_SHEET_TITLE = 'Registros';
+const REGISTRATIONS_SHEET_TITLE = 'Registrations';
 
-async function getOrCriarAbaRegistros() {
-    let sheet = doc.sheetsByTitle[REGISTROS_SHEET_TITLE];
+async function getOrCreateRegistrationsSheet() {
+    let sheet = doc.sheetsByTitle[REGISTRATIONS_SHEET_TITLE];
     if (!sheet) {
-        sheet = await doc.addSheet({ title: REGISTROS_SHEET_TITLE, headerValues: ['UserID', 'Ficha'] });
-        console.log(`Aba "${REGISTROS_SHEET_TITLE}" criada na planilha.`);
+        sheet = await doc.addSheet({ title: REGISTRATIONS_SHEET_TITLE, headerValues: ['UserID', 'CharacterSheet'] });
+        console.log(`Sheet "${REGISTRATIONS_SHEET_TITLE}" created in the spreadsheet.`);
     }
     return sheet;
 }
 
-async function carregarRegistros() {
+async function loadRegistrations() {
     try {
-        const sheet = await getOrCriarAbaRegistros();
+        const sheet = await getOrCreateRegistrationsSheet();
         const rows = await sheet.getRows();
         for (const row of rows) {
             const userId = row.get('UserID');
-            const ficha = row.get('Ficha');
-            if (userId && ficha) userCharacters[userId] = ficha;
+            const characterSheet = row.get('CharacterSheet');
+            if (userId && characterSheet) userCharacters[userId] = characterSheet;
         }
-        console.log(`Registros carregados da planilha: ${Object.keys(userCharacters).length} vínculo(s) de usuário → ficha.`);
+        console.log(`Registrations loaded from the spreadsheet: ${Object.keys(userCharacters).length} user → character link(s).`);
     } catch (e) {
-        console.error('Erro ao carregar registros da planilha:', e);
+        console.error('Error loading registrations from the spreadsheet:', e);
     }
 }
 
-async function salvarRegistro(userId, ficha) {
+async function saveRegistration(userId, characterSheet) {
     try {
-        const sheet = await getOrCriarAbaRegistros();
+        const sheet = await getOrCreateRegistrationsSheet();
         const rows = await sheet.getRows();
-        const existente = rows.find(r => r.get('UserID') === userId);
-        if (existente) {
-            existente.set('Ficha', ficha);
-            await existente.save();
+        const existing = rows.find(r => r.get('UserID') === userId);
+        if (existing) {
+            existing.set('CharacterSheet', characterSheet);
+            await existing.save();
         } else {
-            await sheet.addRow({ UserID: userId, Ficha: ficha });
+            await sheet.addRow({ UserID: userId, CharacterSheet: characterSheet });
         }
     } catch (e) {
-        console.error('Erro ao salvar registro na planilha:', e);
+        console.error('Error saving registration to the spreadsheet:', e);
     }
 }
 
 // ---------------------------------------------------------------------
-// Histórico persistente de rolagens (aba "Rolagens").
+// Persistent roll history (the "Rolls" sheet).
 //
-// O `historicoEventos` lá em cima é outra coisa: um buffer pequeno (6
-// itens) só pra reenviar as últimas rolagens a quem acabou de conectar
-// no overlay, e que se perde a cada restart do bot porque vive só na
-// RAM. Esta seção é o histórico de verdade — cada rolagem (/rl e
-// Rollem) é gravada numa aba própria da planilha, igual acontece com a
-// aba "Registros", então sobrevive a reinícios, quedas e redeploys.
+// `eventHistoryBuffer` above is a different thing: a small buffer (6
+// items) just to resend the latest rolls to whoever just connected to
+// the overlay, and it's lost on every bot restart because it only lives
+// in RAM. This section is the real history — every roll (/roll and
+// Rollem) is written to its own sheet tab, the same way the
+// "Registrations" tab works, so it survives restarts, crashes, and
+// redeploys.
 //
-// Pra aba não crescer pra sempre, o bot mantém só as últimas
-// HISTORICO_ROLAGENS_MAX linhas. A limpeza roda em lotes de
-// HISTORICO_ROLAGENS_LOTE_LIMPEZA em vez de apagar uma linha a cada
-// rolagem nova — isso evita gastar uma chamada de API extra a cada
-// /rl só pra manter o total redondo (a Google Sheets API tem cota de
-// requisições por minuto, e numa mesa animada isso soma rápido). Na
-// prática a aba pode passar um pouco do limite por um instante (até
-// +HISTORICO_ROLAGENS_LOTE_LIMPEZA linhas) entre uma limpeza e outra,
-// o que não faz diferença nenhuma pra um histórico de rolagens.
+// To keep the tab from growing forever, the bot only keeps the last
+// ROLL_HISTORY_MAX rows. Cleanup runs in batches of
+// ROLL_HISTORY_CLEANUP_BATCH instead of deleting one row every single
+// roll — that avoids spending an extra API call on every /roll just to
+// keep the total exactly round (the Google Sheets API has a
+// requests-per-minute quota, and that adds up fast at a lively table).
+// In practice the tab can sit a little above the limit for a moment (up
+// to +ROLL_HISTORY_CLEANUP_BATCH rows) between one cleanup and the
+// next — which makes no practical difference for a roll history.
 // ---------------------------------------------------------------------
-const HISTORICO_ROLAGENS_SHEET_TITLE = 'Rolagens';
-const HISTORICO_ROLAGENS_MAX = 1000; // reduza aqui se a planilha ficar pesada
-const HISTORICO_ROLAGENS_LOTE_LIMPEZA = 50; // apaga em blocos, não linha a linha
+const ROLL_HISTORY_SHEET_TITLE = 'Rolls';
+const ROLL_HISTORY_MAX = 1000; // lower this if the spreadsheet gets too heavy
+const ROLL_HISTORY_CLEANUP_BATCH = 50; // deleted in blocks, not row by row
 
-let historicoRolagensContagem = 0; // contagem em memória — evita reler a aba inteira a cada rolagem
+let rollHistoryRowCount = 0; // in-memory count — avoids re-reading the whole sheet on every roll
 
-async function getOrCriarAbaHistoricoRolagens() {
-    let sheet = doc.sheetsByTitle[HISTORICO_ROLAGENS_SHEET_TITLE];
+async function getOrCreateRollHistorySheet() {
+    let sheet = doc.sheetsByTitle[ROLL_HISTORY_SHEET_TITLE];
     if (!sheet) {
         sheet = await doc.addSheet({
-            title: HISTORICO_ROLAGENS_SHEET_TITLE,
-            headerValues: ['Data', 'Jogador', 'Pericia', 'Alvo', 'Resultado', 'Status'],
+            title: ROLL_HISTORY_SHEET_TITLE,
+            headerValues: ['Date', 'Player', 'Skill', 'Target', 'Result', 'Status'],
         });
-        console.log(`Aba "${HISTORICO_ROLAGENS_SHEET_TITLE}" criada na planilha.`);
+        console.log(`Sheet "${ROLL_HISTORY_SHEET_TITLE}" created in the spreadsheet.`);
     }
     return sheet;
 }
 
 /**
- * Lê a aba de histórico uma única vez, na inicialização do bot, só pra
- * saber quantas linhas já existem. Depois disso a contagem fica só em
- * memória (incrementada a cada gravação, decrementada a cada limpeza),
- * pra nunca mais precisar reler a aba inteira só pra saber o tamanho
- * dela — isso é o que permite decidir "preciso limpar?" sem gastar uma
- * chamada de leitura da API a cada rolagem.
+ * Reads the history sheet exactly once, at bot startup, just to find out
+ * how many rows already exist. After that the count is kept purely in
+ * memory (incremented on every write, decremented on every cleanup), so
+ * the bot never has to re-read the whole sheet again just to know its
+ * size — that's what lets it decide "do I need to clean up?" without
+ * spending a read call on every single roll.
  */
-async function inicializarContagemHistoricoRolagens() {
+async function initRollHistoryRowCount() {
     try {
-        const sheet = await getOrCriarAbaHistoricoRolagens();
+        const sheet = await getOrCreateRollHistorySheet();
         const rows = await sheet.getRows();
-        historicoRolagensContagem = rows.length;
-        console.log(`Histórico de rolagens carregado: ${historicoRolagensContagem} linha(s) na aba "${HISTORICO_ROLAGENS_SHEET_TITLE}".`);
+        rollHistoryRowCount = rows.length;
+        console.log(`Roll history loaded: ${rollHistoryRowCount} row(s) in the "${ROLL_HISTORY_SHEET_TITLE}" sheet.`);
     } catch (e) {
-        console.error('Erro ao inicializar o histórico de rolagens:', e);
+        console.error('Error initializing the roll history:', e);
     }
 }
 
 /**
- * Apaga o excedente mais antigo de uma vez, em lote, quando a aba passa
- * de HISTORICO_ROLAGENS_MAX + HISTORICO_ROLAGENS_LOTE_LIMPEZA linhas.
- * As linhas mais antigas são sempre as do topo da aba (logo abaixo do
- * cabeçalho), então basta pegar as primeiras `excedente` linhas.
+ * Deletes the oldest overflow in one batch, once the sheet goes past
+ * ROLL_HISTORY_MAX + ROLL_HISTORY_CLEANUP_BATCH rows. The oldest rows
+ * are always the ones at the top of the sheet (right below the header),
+ * so we just grab the first `overflow` rows.
  *
- * Apaga de trás pra frente dentro do lote (da última linha buscada pra
- * primeira): apagar uma linha desloca pra cima só as linhas abaixo
- * dela na planilha, então apagar da mais "de baixo" pra mais "de cima"
- * evita que o número de linha das outras já buscadas fique
- * desatualizado no meio do processo.
+ * Deletes back-to-front within the batch (from the last fetched row to
+ * the first): deleting a row shifts up only the rows below it in the
+ * sheet, so deleting from the "lowest" row to the "highest" avoids the
+ * row numbers of the rows we already fetched going stale partway
+ * through.
  */
-async function apararHistoricoRolagensSeNecessario(sheet) {
-    const excedente = historicoRolagensContagem - HISTORICO_ROLAGENS_MAX;
-    if (excedente < HISTORICO_ROLAGENS_LOTE_LIMPEZA) return;
+async function trimRollHistoryIfNeeded(sheet) {
+    const overflow = rollHistoryRowCount - ROLL_HISTORY_MAX;
+    if (overflow < ROLL_HISTORY_CLEANUP_BATCH) return;
 
     try {
-        const linhasAntigas = await sheet.getRows({ offset: 0, limit: excedente });
-        for (let i = linhasAntigas.length - 1; i >= 0; i--) {
-            await linhasAntigas[i].delete();
-            historicoRolagensContagem--;
+        const oldRows = await sheet.getRows({ offset: 0, limit: overflow });
+        for (let i = oldRows.length - 1; i >= 0; i--) {
+            await oldRows[i].delete();
+            rollHistoryRowCount--;
         }
-        console.log(`Histórico de rolagens: ${linhasAntigas.length} linha(s) antiga(s) removida(s) (limite: ${HISTORICO_ROLAGENS_MAX}).`);
+        console.log(`Roll history: removed ${oldRows.length} old row(s) (limit: ${ROLL_HISTORY_MAX}).`);
     } catch (e) {
-        console.error('Erro ao limpar histórico antigo de rolagens:', e);
+        console.error('Error cleaning up old roll history:', e);
     }
 }
 
 /**
- * Grava uma linha do evento recebido na aba de histórico. Funciona
- * tanto para rolagens estruturadas do /rl ("comando", com perícia,
- * alvo e status separados) quanto para rolagens cruas capturadas do
- * bot Rollem (que não têm perícia/alvo/status — só o texto original).
+ * Writes one row for the received event into the history sheet. Works
+ * both for structured /roll events ("command", with skill, target and
+ * status as separate fields) and for raw rolls captured from the Rollem
+ * bot (which have no skill/target/status — just the original text).
  *
- * Chamada a partir de `transmitirEvento` sem `await` de propósito (veja
- * o comentário lá) — erros aqui nunca devem derrubar uma rolagem, por
- * isso ficam só no log.
+ * Called from `broadcastEvent` without `await` on purpose (see the
+ * comment there) — errors here should never take down a roll, so they
+ * only go to the log.
  */
-async function registrarHistoricoRolagem(evento) {
+async function recordRollInHistory(event) {
     try {
-        const sheet = await getOrCriarAbaHistoricoRolagens();
+        const sheet = await getOrCreateRollHistorySheet();
 
-        const linha = {
-            Data: new Date().toLocaleString('pt-BR'),
-            Jogador: evento.jogador || '',
-            Pericia: evento.pericia || '',
-            Alvo: evento.alvo !== undefined ? evento.alvo : '',
-            Resultado: evento.tipo === 'comando' ? evento.valor : (evento.resultado || ''),
-            Status: evento.status || (evento.evento === 'crit' ? 'Crítico' : evento.evento === 'fail' ? 'Falha' : ''),
+        const rowData = {
+            Date: new Date().toLocaleString('en-US'),
+            Player: event.player || '',
+            Skill: event.skill || '',
+            Target: event.target !== undefined ? event.target : '',
+            Result: event.type === 'command' ? event.value : (event.result || ''),
+            Status: event.status || (event.event === 'crit' ? 'Critical' : event.event === 'fail' ? 'Fumble' : ''),
         };
 
-        await sheet.addRow(linha);
-        historicoRolagensContagem++;
-        await apararHistoricoRolagensSeNecessario(sheet);
+        await sheet.addRow(rowData);
+        rollHistoryRowCount++;
+        await trimRollHistoryIfNeeded(sheet);
     } catch (e) {
-        console.error('Erro ao gravar rolagem no histórico da planilha:', e);
+        console.error('Error writing the roll to the spreadsheet history:', e);
     }
 }
 
 /**
- * Reconstrói, a partir de uma linha da aba "Rolagens", o mesmo formato de
- * evento que `transmitirEvento` recebe normalmente — usado para repovoar
- * `historicoEventos` (o buffer em RAM) a partir do que já está salvo na
- * planilha assim que o bot sobe. Sem isso, um restart do processo
- * (redeploy, crash, hibernação no Render) zera o buffer em memória e o
- * overlay só volta a ver histórico depois que rolagens novas acontecerem
- * — mesmo a planilha já tendo tudo guardado.
+ * Rebuilds, from a row in the "Rolls" sheet, the same event shape that
+ * `broadcastEvent` normally receives — used to repopulate
+ * `eventHistoryBuffer` (the in-RAM buffer) from what's already saved in
+ * the spreadsheet as soon as the bot starts up. Without this, a process
+ * restart (redeploy, crash, sleep cycle on Render) resets the in-memory
+ * buffer, and the overlay only sees history again once new rolls start
+ * happening — even though the spreadsheet already has it all stored.
  *
- * A distinção "comando" (/rl) vs "rollem" (bot terceiro) é feita pela
- * presença da coluna Perícia, que só rolagens de /rl preenchem.
+ * The "command" (/roll) vs "rollem" (third-party bot) distinction is
+ * made by the presence of the Skill column, which only /roll rolls fill in.
  */
-function eventoAPartirDaLinhaHistorico(row) {
-    const jogador = row.get('Jogador') || '';
-    const pericia = row.get('Pericia') || '';
-    const alvo = row.get('Alvo');
-    const resultado = row.get('Resultado') || '';
+function eventFromHistoryRow(row) {
+    const player = row.get('Player') || '';
+    const skill = row.get('Skill') || '';
+    const target = row.get('Target');
+    const result = row.get('Result') || '';
     const status = row.get('Status') || '';
 
-    if (pericia) {
-        // Rolagem estruturada de /rl: a coluna Status guarda o texto
-        // bruto do resultado ("CRÍTICO ABSOLUTO (01)", "DESASTRE",
-        // "SUCESSO..."), não 'crit'/'fail' diretamente (ver
-        // registrarHistoricoRolagem) — por isso o tipo de evento é
-        // inferido a partir desse texto.
-        let evento = 'normal';
-        if (/crítico/i.test(status)) evento = 'crit';
-        else if (/desastre/i.test(status)) evento = 'fail';
+    if (skill) {
+        // Structured /roll event: the Status column holds the raw result
+        // text ("CRITICAL SUCCESS (01)", "FUMBLE", "...SUCCESS"), not
+        // 'crit'/'fail' directly (see recordRollInHistory) — so the event
+        // type is inferred from that text.
+        let event = 'normal';
+        if (/critical/i.test(status)) event = 'crit';
+        else if (/fumble/i.test(status)) event = 'fail';
 
         return {
-            tipo: 'comando',
-            jogador,
-            pericia,
-            alvo,
-            valor: resultado,
+            type: 'command',
+            player,
+            skill,
+            target,
+            value: result,
             status,
-            vantagem: '',
-            evento,
+            advantage: '',
+            event,
         };
     }
 
-    // Rolagem crua do bot "rollem": aqui a coluna Status já guarda
-    // 'Crítico' / 'Falha' / '' diretamente.
-    let evento = 'normal';
-    if (status === 'Crítico') evento = 'crit';
-    else if (status === 'Falha') evento = 'fail';
+    // Raw roll from the "rollem" bot: here the Status column already
+    // holds 'Critical' / 'Fumble' / '' directly.
+    let event = 'normal';
+    if (status === 'Critical') event = 'crit';
+    else if (status === 'Fumble') event = 'fail';
 
-    return { tipo: 'rollem', jogador, resultado, evento };
+    return { type: 'rollem', player, result, event };
 }
 
 /**
- * Repovoa `historicoEventos` com as últimas HISTORICO_MAX rolagens já
- * salvas na aba "Rolagens", lidas diretamente da planilha (offset pelo
- * total de linhas já contado em `inicializarContagemHistoricoRolagens`,
- * então não precisa reler a aba inteira). Chamada uma única vez, na
- * inicialização do bot — depois disso o buffer é mantido normalmente
- * por `transmitirEvento` a cada rolagem nova.
+ * Repopulates `eventHistoryBuffer` with the last HISTORY_BUFFER_MAX rolls
+ * already saved in the "Rolls" sheet, read directly from the spreadsheet
+ * (offset by the total row count already counted in
+ * initRollHistoryRowCount, so there's no need to re-read the whole
+ * sheet). Called once, at bot startup — after that the buffer is
+ * maintained normally by `broadcastEvent` on every new roll.
  */
-async function carregarHistoricoRecenteDaPlanilha() {
+async function loadRecentHistoryFromSheet() {
     try {
-        const sheet = await getOrCriarAbaHistoricoRolagens();
-        const offset = Math.max(0, historicoRolagensContagem - HISTORICO_MAX);
-        const rows = await sheet.getRows({ offset, limit: HISTORICO_MAX });
-        historicoEventos = rows.map(eventoAPartirDaLinhaHistorico);
-        console.log(`Buffer de histórico do overlay repovoado com ${historicoEventos.length} rolagem(ns) vinda(s) da planilha.`);
+        const sheet = await getOrCreateRollHistorySheet();
+        const offset = Math.max(0, rollHistoryRowCount - HISTORY_BUFFER_MAX);
+        const rows = await sheet.getRows({ offset, limit: HISTORY_BUFFER_MAX });
+        eventHistoryBuffer = rows.map(eventFromHistoryRow);
+        console.log(`Overlay history buffer repopulated with ${eventHistoryBuffer.length} roll(s) from the spreadsheet.`);
     } catch (e) {
-        console.error('Erro ao repovoar o histórico do overlay a partir da planilha:', e);
+        console.error('Error repopulating the overlay history from the spreadsheet:', e);
     }
 }
 
 /**
- * Lê a aba `sheetTitle` da planilha e extrai atributos, perícias, Sorte,
- * Sanidade e o nome do personagem, populando characterCache/nomeFichaCache.
+ * Reads the `sheetTitle` tab and extracts attributes, skills, Luck,
+ * Sanity and the character's name, populating characterCache /
+ * characterNameCache.
  *
- * A extração é feita por reconhecimento de padrão de texto (rótulos e
- * marcadores como "%"), não por posição fixa de célula — isso torna a
- * leitura resiliente a pequenas variações de layout entre fichas.
+ * Extraction is done by recognizing text patterns (labels and markers
+ * like "%"), not by fixed cell position — this makes reading resilient
+ * to small layout differences between character sheets.
  *
- * @param {string} sheetTitle - Título da aba correspondente à ficha.
- * @returns {Promise<boolean>} true se a sincronização foi concluída com sucesso.
+ * @param {string} sheetTitle - Title of the tab for this character sheet.
+ * @returns {Promise<boolean>} true if the sync completed successfully.
  */
 async function syncCharacter(sheetTitle) {
     try {
         const sheet = doc.sheetsByTitle[sheetTitle];
         if (!sheet) return false;
 
-        await sheet.loadCells('A1:R100'); 
+        await sheet.loadCells('A1:R100');
         const stats = {};
 
-        // A "Sanidade Atual" tem posição fixa nesta ficha (célula M8).
-        const celulaSanidade = sheet.getCell(7, 12); // linha 8, coluna M (0-indexado)
-        if (typeof celulaSanidade.value === 'number') {
-            stats['Sanidade'] = celulaSanidade.value;
+        // "Current Sanity" has a fixed position on this sheet (cell M8).
+        const sanityCell = sheet.getCell(7, 12); // row 8, column M (0-indexed)
+        if (typeof sanityCell.value === 'number') {
+            stats['Sanity'] = sanityCell.value;
         }
 
-        // Perícias seguem o padrão "Nome (xx%)" — ex.: "Lutar (Briga) (25%)",
-        // "Psicologia (10%)", "Esquivar (metade da DES%)". Identificamos a
-        // célula por esse padrão textual (e não por posição/coluna), já que
-        // atributos (FOR, DES...) e demais campos não seguem essa notação.
-        const padraoPericiaTeste = /\([^()]*%[^()]*\)/;
-        const padraoPericiaRemover = /\([^()]*%[^()]*\)/g;
+        // Skills follow the pattern "Name (xx%)" — e.g. "Fighting (Brawl) (25%)",
+        // "Psychology (10%)", "Dodge (half DEX%)". We identify the cell by
+        // this text pattern (rather than by position/column), since
+        // attributes (STR, DEX...) and other fields don't follow this
+        // notation.
+        const skillPatternTest = /\([^()]*%[^()]*\)/;
+        const skillPatternStrip = /\([^()]*%[^()]*\)/g;
 
-        // Atributos: célula cujo valor corresponde exatamente a uma dessas siglas.
-        const padraoAtributo = /^(FOR|DES|INT|CON|APA|POD|TAM|EDU)$/i;
+        // Attributes: a cell whose value matches exactly one of these
+        // abbreviations — STR/DEX/INT/CON/APP/POW/SIZ/EDU — matching what's
+        // printed on this build's English character sheet template
+        // (Ficha_CoC_en.xlsx). Change this pattern if your own sheet
+        // template uses different abbreviations.
+        const attributePattern = /^(STR|DEX|INT|CON|APP|POW|SIZ|EDU)$/i;
 
         for (let r = 0; r < 100; r++) {
             for (let c = 0; c < 16; c++) {
                 const cell = sheet.getCell(r, c);
                 if (typeof cell.value !== 'string') continue;
 
-                const textoCelula = cell.value.replace(/\n/g, ' ').trim();
-                if (!textoCelula) continue;
+                const cellText = cell.value.replace(/\n/g, ' ').trim();
+                if (!cellText) continue;
 
-                // Nome do personagem: o rótulo "Nome:" ocupa uma célula e o
-                // valor (em célula mesclada, ex.: D3:F3) fica deslocado à
-                // direita. Testamos alguns deslocamentos até localizar uma
-                // string não vazia.
-                if (/^nome:?$/i.test(textoCelula)) {
+                // Character name: the label "Name:" occupies one cell and
+                // the value (in a merged cell, e.g. D3:F3) sits offset to
+                // the right. We try a few offsets until we find a
+                // non-empty string.
+                if (/^name:?$/i.test(cellText)) {
                     for (const offset of [1, 2, 3]) {
-                        const valorCell = sheet.getCell(r, c + offset);
-                        if (valorCell && typeof valorCell.value === 'string' && valorCell.value.trim()) {
-                            nomeFichaCache[sheetTitle] = valorCell.value.trim();
+                        const valueCell = sheet.getCell(r, c + offset);
+                        if (valueCell && typeof valueCell.value === 'string' && valueCell.value.trim()) {
+                            characterNameCache[sheetTitle] = valueCell.value.trim();
                             break;
                         }
                     }
                     continue;
                 }
 
-                // Perícias
-                if (padraoPericiaTeste.test(textoCelula)) {
-                    const statName = textoCelula
-                        .replace(padraoPericiaRemover, '')
+                // Skills
+                if (skillPatternTest.test(cellText)) {
+                    const statName = cellText
+                        .replace(skillPatternStrip, '')
                         .replace(/\s+/g, ' ')
                         .trim();
 
                     if (statName) {
-                        // O valor da perícia normalmente fica 2 colunas à direita
-                        // do nome (a célula intermediária fica vazia devido à
-                        // mesclagem). Caso não seja encontrado, tenta 1 coluna
-                        // à direita como alternativa.
-                        let valor;
+                        // The skill's value is usually 2 columns to the right
+                        // of the name (the in-between cell is empty due to
+                        // merging). If not found, try 1 column to the right
+                        // as a fallback.
+                        let value;
                         for (const offset of [2, 1]) {
-                            const valorCell = sheet.getCell(r, c + offset);
-                            if (valorCell && typeof valorCell.value === 'number') {
-                                valor = valorCell.value;
+                            const valueCell = sheet.getCell(r, c + offset);
+                            if (valueCell && typeof valueCell.value === 'number') {
+                                value = valueCell.value;
                                 break;
                             }
                         }
-                        if (valor !== undefined) stats[statName] = valor;
+                        if (value !== undefined) stats[statName] = value;
                     }
                     continue;
                 }
 
-                // Atributos (FOR, DES, INT, CON, APA, POD, TAM, EDU)
-                if (padraoAtributo.test(textoCelula)) {
-                    const valorCell = sheet.getCell(r, c + 1);
-                    if (valorCell && typeof valorCell.value === 'number') {
-                        stats[textoCelula.toUpperCase()] = valorCell.value;
+                // Attributes (STR, DEX, INT, CON, APP, POW, SIZ, EDU)
+                if (attributePattern.test(cellText)) {
+                    const valueCell = sheet.getCell(r, c + 1);
+                    if (valueCell && typeof valueCell.value === 'number') {
+                        stats[cellText.toUpperCase()] = valueCell.value;
                     }
                     continue;
                 }
 
-                // Sorte
-                if (/^sorte$/i.test(textoCelula)) {
+                // Luck
+                if (/^luck$/i.test(cellText)) {
                     for (const offset of [1, 2]) {
-                        const valorCell = sheet.getCell(r, c + offset);
-                        if (valorCell && typeof valorCell.value === 'number') {
-                            stats['Sorte'] = valorCell.value;
+                        const valueCell = sheet.getCell(r, c + offset);
+                        if (valueCell && typeof valueCell.value === 'number') {
+                            stats['Luck'] = valueCell.value;
                             break;
                         }
                     }
                     continue;
                 }
 
-                // Sanidade: "Sanidade" é apenas o título da seção; o valor
-                // "Atual" fica em uma das linhas logo abaixo (o mesmo rótulo
-                // "Atual" também aparece nas seções de Vida e Magia, por isso
-                // a busca é restrita à vizinhança imediata do título).
-                if (/^sanidade$/i.test(textoCelula) && !stats['Sanidade']) {
-                    for (let r2 = r + 1; r2 <= r + 3 && r2 < 100 && !stats['Sanidade']; r2++) {
+                // Sanity: "Sanity" is just the section title; the
+                // "Current" value sits on one of the rows right below it
+                // (the same "Current" label also appears in the Hit
+                // Points and Magic Points sections, which is why the
+                // search is restricted to the immediate neighborhood of
+                // the title).
+                if (/^sanity$/i.test(cellText) && !stats['Sanity']) {
+                    for (let r2 = r + 1; r2 <= r + 3 && r2 < 100 && !stats['Sanity']; r2++) {
                         for (let c2 = 0; c2 < 16; c2++) {
                             const labelCell = sheet.getCell(r2, c2);
-                            if (typeof labelCell.value === 'string' && /^atual$/i.test(labelCell.value.trim())) {
-                                const valorCell = sheet.getCell(r2, c2 + 1);
-                                if (valorCell && typeof valorCell.value === 'number') {
-                                    stats['Sanidade'] = valorCell.value;
+                            if (typeof labelCell.value === 'string' && /^current$/i.test(labelCell.value.trim())) {
+                                const valueCell = sheet.getCell(r2, c2 + 1);
+                                if (valueCell && typeof valueCell.value === 'number') {
+                                    stats['Sanity'] = valueCell.value;
                                     break;
                                 }
                             }
@@ -445,48 +463,50 @@ async function syncCharacter(sheetTitle) {
         characterCache[sheetTitle] = stats;
         return true;
     } catch (e) {
-        console.error("Erro ao sincronizar ficha:", e);
+        console.error("Error syncing character sheet:", e);
         return false;
     }
 }
 
 client.once('ready', async () => {
-    console.log(`Bot conectado como ${client.user.tag}!`);
+    console.log(`Bot logged in as ${client.user.tag}!`);
     await doc.loadInfo();
-    console.log(`Planilha "${doc.title}" carregada com sucesso!`);
+    console.log(`Spreadsheet "${doc.title}" loaded successfully!`);
 
-    // Restaura os vínculos usuário → ficha salvos na planilha e resincroniza
-    // o cache de cada ficha envolvida, para que /rl já funcione sem que
-    // ninguém precise rodar /registrar de novo depois de um restart.
-    await carregarRegistros();
-    const fichasParaResincronizar = new Set(Object.values(userCharacters));
-    for (const sheetTitle of fichasParaResincronizar) {
+    // Restores the user → character links saved in the spreadsheet and
+    // re-syncs the cache for each character sheet involved, so /roll
+    // already works without anyone needing to run /register again after
+    // a restart.
+    await loadRegistrations();
+    const sheetsToResync = new Set(Object.values(userCharacters));
+    for (const sheetTitle of sheetsToResync) {
         const ok = await syncCharacter(sheetTitle);
-        console.log(ok ? `Ficha "${sheetTitle}" resincronizada.` : `Falha ao resincronizar "${sheetTitle}".`);
+        console.log(ok ? `Character sheet "${sheetTitle}" re-synced.` : `Failed to re-sync "${sheetTitle}".`);
     }
 
-    // Descobre quantas linhas já existem na aba "Rolagens" (criando a
-    // aba se ainda não existir), pra que a limpeza em lote saiba desde
-    // já se precisa rodar assim que novas rolagens começarem a chegar.
-    await inicializarContagemHistoricoRolagens();
+    // Finds out how many rows already exist in the "Rolls" sheet
+    // (creating the sheet if it doesn't exist yet), so batch cleanup
+    // already knows whether it needs to run as soon as new rolls start
+    // coming in.
+    await initRollHistoryRowCount();
 
-    // Repovoa o buffer em RAM (historicoEventos) com o que já estava
-    // salvo na planilha, pra que um overlay que conecte logo após um
-    // restart do bot já receba o histórico recente — e não só rolagens
-    // que aconteceram depois da subida do processo.
-    await carregarHistoricoRecenteDaPlanilha();
+    // Repopulates the in-RAM buffer (eventHistoryBuffer) with what was
+    // already saved in the spreadsheet, so that an overlay connecting
+    // right after a bot restart already gets the recent history — not
+    // just rolls that happen after the process comes back up.
+    await loadRecentHistoryFromSheet();
 
     const commands = [
         new SlashCommandBuilder()
-            .setName('registrar')
-            .setDescription('Vincula sua conta a uma ficha.')
-            .addStringOption(opt => opt.setName('personagem').setDescription('Nome do personagem').setRequired(true).setAutocomplete(true)),
+            .setName('register')
+            .setDescription('Links your account to a character sheet.')
+            .addStringOption(opt => opt.setName('character').setDescription('Character name').setRequired(true).setAutocomplete(true)),
         new SlashCommandBuilder()
-            .setName('rl')
-            .setDescription('Rola uma perícia ou atributo (Automático)')
-            .addStringOption(opt => opt.setName('pericia').setDescription('O que rolar?').setRequired(true).setAutocomplete(true))
-            .addStringOption(opt => opt.setName('vantagem').setDescription('Bônus ou Penalidade?').setRequired(false)
-                .addChoices({ name: 'Vantagem (Bônus)', value: 'V' }, { name: 'Desvantagem (Penalidade)', value: 'D' }))
+            .setName('roll')
+            .setDescription('Rolls a skill or attribute (Automatic)')
+            .addStringOption(opt => opt.setName('skill').setDescription('What to roll?').setRequired(true).setAutocomplete(true))
+            .addStringOption(opt => opt.setName('advantage').setDescription('Bonus or Penalty?').setRequired(false)
+                .addChoices({ name: 'Advantage (Bonus)', value: 'ADV' }, { name: 'Disadvantage (Penalty)', value: 'DIS' }))
     ];
 
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -494,197 +514,201 @@ client.once('ready', async () => {
 });
 
 // =====================================================================
-// FONTE 1 — Observação de rolagens do bot "rollem"
+// SOURCE 1 — Watching rolls from the "rollem" bot
 //
-// O bot escuta as mensagens desse bot terceiro no canal, interpreta o
-// texto da rolagem (1d100, múltiplas rolagens, notação com colchetes)
-// e classifica o resultado como crítico, falha crítica ou normal antes
-// de retransmitir o evento para o overlay.
+// The bot listens to that third-party bot's messages in the channel,
+// parses the roll text (1d100, multiple rolls, bracket notation) and
+// classifies the result as critical, fumble, or normal before relaying
+// the event to the overlay.
 // =====================================================================
 client.on('messageCreate', async (message) => {
+  // "rollem" is the actual Discord username of the third-party dice bot
+  // being observed — keep this literal string as-is; it's not something
+  // to translate, it has to match that bot's real username.
   if (message.author.username !== 'rollem') return;
 
-  let jogador = "Investigador";
+  let player = "Investigator";
   if (message.reference && message.reference.messageId) {
     try {
-      const mensagemOriginal = await message.channel.messages.fetch(message.reference.messageId);
-      let membro = mensagemOriginal.member;
+      const originalMessage = await message.channel.messages.fetch(message.reference.messageId);
+      let member = originalMessage.member;
 
-      // Nem sempre a mensagem buscada traz o membro embutido (ex.: cache
-      // desatualizado). Nesse caso, busca o membro diretamente na guild
-      // para exibir o apelido do servidor em vez do nome global do Discord.
-      if (!membro && message.guild) {
+      // The fetched message doesn't always come with the member embedded
+      // (e.g. a stale cache). In that case, fetch the member directly from
+      // the guild to show the server nickname instead of the global
+      // Discord username.
+      if (!member && message.guild) {
         try {
-          membro = await message.guild.members.fetch(mensagemOriginal.author.id);
-        } catch (erroMembro) {
-          console.error("Membro não encontrado na guild — usando o nome do Discord como alternativa.");
+          member = await message.guild.members.fetch(originalMessage.author.id);
+        } catch (memberError) {
+          console.error("Member not found in the guild — falling back to the Discord username.");
         }
       }
 
-      jogador = membro ? membro.displayName : mensagemOriginal.author.displayName;
+      player = member ? member.displayName : originalMessage.author.displayName;
     } catch (error) {
-      console.error("Falha ao recuperar a mensagem original do autor da rolagem.");
+      console.error("Failed to fetch the original message for the author of the roll.");
     }
   }
 
-  const textoOriginal = message.content;
-  const textoLimpo = textoOriginal.replace(/[*_~`]/g, '');
-  let tipoEvento = 'normal';
-  const matchDado = textoLimpo.match(/(?:(\d+)\s*#\s*)?(\d*)\s*d(\d+)/i);
+  const originalText = message.content;
+  const cleanText = originalText.replace(/[*_~`]/g, '');
+  let eventType = 'normal';
+  const diceMatch = cleanText.match(/(?:(\d+)\s*#\s*)?(\d*)\s*d(\d+)/i);
 
-  if (matchDado) {
-    const qtdDados = parseInt(matchDado[2] || "1"); 
-    const faces = parseInt(matchDado[3]);
+  if (diceMatch) {
+    const diceCount = parseInt(diceMatch[2] || "1");
+    const faces = parseInt(diceMatch[3]);
 
     if (faces === 100) {
-      let valoresRolados = [];
-      const matchColchetes = textoLimpo.match(/\[([\d,\s]+)\]/);
-      
-      if (matchColchetes) {
-        valoresRolados = matchColchetes[1].split(',').map(n => parseInt(n.trim()));
+      let rolledValues = [];
+      const bracketMatch = cleanText.match(/\[([\d,\s]+)\]/);
+
+      if (bracketMatch) {
+        rolledValues = bracketMatch[1].split(',').map(n => parseInt(n.trim()));
       } else {
-        const aposIgual = textoLimpo.includes('=') ? textoLimpo.split('=').pop() : textoLimpo;
-        const numeros = aposIgual.replace(/[^0-9,]/g, '').split(',').filter(Boolean);
-        valoresRolados = numeros.map(n => parseInt(n.trim()));
+        const afterEquals = cleanText.includes('=') ? cleanText.split('=').pop() : cleanText;
+        const numbers = afterEquals.replace(/[^0-9,]/g, '').split(',').filter(Boolean);
+        rolledValues = numbers.map(n => parseInt(n.trim()));
       }
 
-      if (valoresRolados.length > 0 && qtdDados === 1) {
-        const valorFinal = Math.max(...valoresRolados);
-        if (valorFinal === 1) tipoEvento = 'crit';
-        if (valorFinal === 100) tipoEvento = 'fail';
+      if (rolledValues.length > 0 && diceCount === 1) {
+        const finalValue = Math.max(...rolledValues);
+        if (finalValue === 1) eventType = 'crit';
+        if (finalValue === 100) eventType = 'fail';
       }
     }
   }
 
-  transmitirEvento({ tipo: 'rollem', jogador: jogador, resultado: textoOriginal, evento: tipoEvento });
+  broadcastEvent({ type: 'rollem', player: player, result: originalText, event: eventType });
 });
 
 // =====================================================================
-// FONTE 2 — Comandos slash (/registrar e /rl)
+// SOURCE 2 — Slash commands (/register and /roll)
 // =====================================================================
 client.on('interactionCreate', async interaction => {
-    if (interaction.isAutocomplete() && interaction.commandName === 'rl') {
+    if (interaction.isAutocomplete() && interaction.commandName === 'roll') {
         const userId = interaction.user.id;
-        const personagem = userCharacters[userId];
-        if (!personagem || !characterCache[personagem]) return await interaction.respond([]);
+        const characterSheet = userCharacters[userId];
+        if (!characterSheet || !characterCache[characterSheet]) return await interaction.respond([]);
 
-        const focado = interaction.options.getFocused();
-        const pericias = Object.keys(characterCache[personagem]);
-        const filtradas = pericias.filter(p => p.toLowerCase().includes(focado.toLowerCase())).slice(0, 25);
-        await interaction.respond(filtradas.map(p => ({ name: p, value: p })));
+        const focused = interaction.options.getFocused();
+        const skills = Object.keys(characterCache[characterSheet]);
+        const filtered = skills.filter(s => s.toLowerCase().includes(focused.toLowerCase())).slice(0, 25);
+        await interaction.respond(filtered.map(s => ({ name: s, value: s })));
     }
 
-    if (interaction.isAutocomplete() && interaction.commandName === 'registrar') {
-        const focado = interaction.options.getFocused().toLowerCase();
-        const fichas = doc.sheetsByIndex.map(s => s.title);
-        const filtradas = fichas
-            .filter(t => t.toLowerCase().includes(focado))
+    if (interaction.isAutocomplete() && interaction.commandName === 'register') {
+        const focused = interaction.options.getFocused().toLowerCase();
+        const characterSheets = doc.sheetsByIndex.map(s => s.title);
+        const filtered = characterSheets
+            .filter(t => t.toLowerCase().includes(focused))
             .slice(0, 25);
-        await interaction.respond(filtradas.map(t => ({ name: t, value: t })));
+        await interaction.respond(filtered.map(t => ({ name: t, value: t })));
     }
 
     if (!interaction.isChatInputCommand()) return;
 
-    if (interaction.commandName === 'registrar') {
+    if (interaction.commandName === 'register') {
         await interaction.deferReply({ ephemeral: true });
-        const busca = interaction.options.getString('personagem').toLowerCase();
-        const sheet = doc.sheetsByIndex.find(s => s.title.toLowerCase().includes(busca));
-        
-        if (!sheet) return interaction.editReply(`Não encontrei aba contendo "${busca}".`);
+        const search = interaction.options.getString('character').toLowerCase();
+        const sheet = doc.sheetsByIndex.find(s => s.title.toLowerCase().includes(search));
 
-        const sucesso = await syncCharacter(sheet.title);
-        if (sucesso) {
+        if (!sheet) return interaction.editReply(`Couldn't find a tab containing "${search}".`);
+
+        const success = await syncCharacter(sheet.title);
+        if (success) {
             userCharacters[interaction.user.id] = sheet.title;
-            await salvarRegistro(interaction.user.id, sheet.title);
-            interaction.editReply(`Conta vinculada com sucesso à **${sheet.title}**!`);
+            await saveRegistration(interaction.user.id, sheet.title);
+            interaction.editReply(`Account successfully linked to **${sheet.title}**!`);
         } else {
-            interaction.editReply(`Erro ao ler a ficha **${sheet.title}**.`);
+            interaction.editReply(`Error reading character sheet **${sheet.title}**.`);
         }
     }
 
-    if (interaction.commandName === 'rl') {
+    if (interaction.commandName === 'roll') {
         const userId = interaction.user.id;
-        const personagem = userCharacters[userId];
+        const characterSheet = userCharacters[userId];
 
-        if (!personagem) return interaction.reply({ content: 'Use `/registrar [nome]` primeiro.', ephemeral: true });
+        if (!characterSheet) return interaction.reply({ content: 'Use `/register [name]` first.', ephemeral: true });
 
-        const periciaNome = interaction.options.getString('pericia');
-        const vantagem = interaction.options.getString('vantagem'); 
-        const valorBase = characterCache[personagem][periciaNome];
-        
-        if (valorBase === undefined) return interaction.reply({ content: `Perícia **${periciaNome}** não encontrada.`, ephemeral: true });
+        const skillName = interaction.options.getString('skill');
+        const advantage = interaction.options.getString('advantage');
+        const baseValue = characterCache[characterSheet][skillName];
 
-        const unidade = Math.floor(Math.random() * 10);
-        const numDadosDezena = (vantagem === 'V' || vantagem === 'D') ? 2 : 1;
-        const dezenas = [];
-        for(let i = 0; i < numDadosDezena; i++) dezenas.push(Math.floor(Math.random() * 10));
+        if (baseValue === undefined) return interaction.reply({ content: `Skill **${skillName}** not found.`, ephemeral: true });
 
-        const totaisPossiveis = dezenas.map(dez => {
-            let t = (dez * 10) + unidade;
+        const onesDigit = Math.floor(Math.random() * 10);
+        const tensDiceCount = (advantage === 'ADV' || advantage === 'DIS') ? 2 : 1;
+        const tensRolls = [];
+        for (let i = 0; i < tensDiceCount; i++) tensRolls.push(Math.floor(Math.random() * 10));
+
+        const possibleTotals = tensRolls.map(tens => {
+            let t = (tens * 10) + onesDigit;
             if (t === 0) return 100;
             return t;
         });
 
-        let totalFinal;
-        if (vantagem === 'V') totalFinal = Math.min(...totaisPossiveis);
-        else if (vantagem === 'D') totalFinal = Math.max(...totaisPossiveis);
-        else totalFinal = totaisPossiveis[0];
+        let finalTotal;
+        if (advantage === 'ADV') finalTotal = Math.min(...possibleTotals);
+        else if (advantage === 'DIS') finalTotal = Math.max(...possibleTotals);
+        else finalTotal = possibleTotals[0];
 
-        const valorBom = Math.floor(valorBase / 2);
-        const valorExtremo = Math.floor(valorBase / 5);
-        const isFumble = (totalFinal >= 96 && valorBase < 50) || totalFinal === 100;
+        const goodValue = Math.floor(baseValue / 2);
+        const extremeValue = Math.floor(baseValue / 5);
+        const isFumble = (finalTotal >= 96 && baseValue < 50) || finalTotal === 100;
 
-        let resultadoTexto = '';
-        let eventoOBS = 'normal';
-        let corEmbed = 0x228B22; 
+        let resultText = '';
+        let obsEvent = 'normal';
+        let embedColor = 0x228B22;
 
-        if (totalFinal === 1) {
-            resultadoTexto = '**CRÍTICO ABSOLUTO (01)**';
-            corEmbed = 0xFFD700;
-            eventoOBS = 'crit';
+        if (finalTotal === 1) {
+            resultText = '**CRITICAL SUCCESS (01)**';
+            embedColor = 0xFFD700;
+            obsEvent = 'crit';
         } else if (isFumble) {
-            resultadoTexto = '**DESASTRE**';
-            corEmbed = 0x8B0000;
-            eventoOBS = 'fail';
-        } else if (totalFinal <= valorExtremo) {
-            resultadoTexto = '**SUCESSO EXTREMO**';
-            corEmbed = 0x00BFFF;
-        } else if (totalFinal <= valorBom) {
-            resultadoTexto = '**SUCESSO BOM**';
-            corEmbed = 0x32CD32;
-        } else if (totalFinal <= valorBase) {
-            resultadoTexto = '**SUCESSO NORMAL**';
+            resultText = '**FUMBLE**';
+            embedColor = 0x8B0000;
+            obsEvent = 'fail';
+        } else if (finalTotal <= extremeValue) {
+            resultText = '**EXTREME SUCCESS**';
+            embedColor = 0x00BFFF;
+        } else if (finalTotal <= goodValue) {
+            resultText = '**HARD SUCCESS**';
+            embedColor = 0x32CD32;
+        } else if (finalTotal <= baseValue) {
+            resultText = '**REGULAR SUCCESS**';
         } else {
-            resultadoTexto = '**FALHA**';
-            corEmbed = 0xFF0000;
+            resultText = '**FAILURE**';
+            embedColor = 0xFF0000;
         }
 
-        const nomeParaOBS = nomeFichaCache[personagem] || personagem.replace(/Ficha \d+ \(/, '').replace(/\)/, '');
-        const statusLimpo = resultadoTexto.replace(/[*_~`]/g, '');
-        const avisoVantPlano = vantagem === 'V' ? 'Vantagem' : (vantagem === 'D' ? 'Desvantagem' : '');
-        const textoOBS = `Rolou ${totalFinal} em ${periciaNome} (Alvo: ${valorBase}) ➔ ${statusLimpo}`;
+        const nameForOBS = characterNameCache[characterSheet] || characterSheet.replace(/Character Sheet \d+ \(/, '').replace(/\)/, '');
+        const cleanStatus = resultText.replace(/[*_~`]/g, '');
+        const advantagePlainLabel = advantage === 'ADV' ? 'Advantage' : (advantage === 'DIS' ? 'Disadvantage' : '');
+        const obsText = `Rolled ${finalTotal} on ${skillName} (Target: ${baseValue}) ➔ ${cleanStatus}`;
 
-        transmitirEvento({
-            tipo: 'comando',
-            jogador: nomeParaOBS,
-            pericia: periciaNome,
-            alvo: valorBase,
-            valor: totalFinal,
-            status: statusLimpo,
-            vantagem: avisoVantPlano,
-            resultado: textoOBS,
-            evento: eventoOBS
+        broadcastEvent({
+            type: 'command',
+            player: nameForOBS,
+            skill: skillName,
+            target: baseValue,
+            value: finalTotal,
+            status: cleanStatus,
+            advantage: advantagePlainLabel,
+            result: obsText,
+            event: obsEvent
         });
 
-        const avisoVant = vantagem === 'V' ? ' *(Vantagem)*' : (vantagem === 'D' ? ' *(Desvantagem)*' : '');
+        const advantageLabel = advantage === 'ADV' ? ' *(Advantage)*' : (advantage === 'DIS' ? ' *(Disadvantage)*' : '');
         const embed = new EmbedBuilder()
-            .setTitle(`${nomeParaOBS} rolou ${periciaNome}`)
-            .setDescription(`**Alvo:** ${valorBase}  |  Bom: ${valorBom}  |  Extremo: ${valorExtremo}`)
+            .setTitle(`${nameForOBS} rolled ${skillName}`)
+            .setDescription(`**Target:** ${baseValue}  |  Hard: ${goodValue}  |  Extreme: ${extremeValue}`)
             .addFields(
-                { name: `Rolagem${avisoVant}`, value: `Dezena(s): [${dezenas.map(d=>d+'0').join(', ')}] \nUnidade: [${unidade}] \n**Resultado: ${totalFinal}**` },
-                { name: 'Status', value: resultadoTexto }
+                { name: `Roll${advantageLabel}`, value: `Tens digit(s): [${tensRolls.map(d => d + '0').join(', ')}] \nOnes digit: [${onesDigit}] \n**Result: ${finalTotal}**` },
+                { name: 'Status', value: resultText }
             )
-            .setColor(corEmbed);
+            .setColor(embedColor);
 
         await interaction.reply({ embeds: [embed] });
     }
